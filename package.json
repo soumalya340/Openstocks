@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "build": "tsc -p tsconfig.build.json",
     "postinstall": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:live": "node scripts/check-live.mjs"
   },
   "engines": {
     "node": ">=20"

@@ -19,7 +19,10 @@ cp .env.example .env   # edit secrets/paths as needed
 yarn test              # Vitest suite
 yarn start             # node dist/src/index.js (http://localhost:$PORT)
 yarn dev               # tsx watch for local development
+yarn check:live        # hit every API route on Render; console.log each result
 ```
+
+`yarn check:live` defaults to `https://openstocks-2r66.onrender.com` (override with `BASE_URL`). Each connection prints JSON with `method`, `path`, `status`, and `body` (or `error`).
 
 ### Render deploy
 
