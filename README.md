@@ -44,33 +44,77 @@ Environment variables are loaded from `.env` via `dotenv` (`src/env.ts`):
 
 `.env` is gitignored; commit `.env.example` as the template. Requires Node 20+.
 
+## Routes (HTTP + WebSocket)
+
+| Method | Path | Auth | Body / notes |
+|--------|------|------|----------------|
+| `GET` | `/health` | — | Liveness `{ ok: true }` |
+| `POST` | `/auth/token` | — | `{ "username": "alice" }` → JWT |
+| `GET` | `/assets` | — | All assets + price history |
+| `GET` | `/assets/:symbol` | — | One asset + history (`vSOL`, `vATL`, `vHLX`, `vVAN`) |
+| `POST` | `/calculator` | — | `{ "symbol", "usdAmount" }` → shares (no side effects) |
+| `POST` | `/orders` | Bearer | Headers: `Idempotency-Key`. Body: `{ "symbol", "side", "type", "quantity", "limitPrice?" }` |
+| `DELETE` | `/orders/:id` | Bearer | Cancel a resting order |
+| `GET` | `/portfolio` | Bearer | Holdings, cost basis, P&L, margin |
+| `GET` | `/portfolio/history?at=` | Bearer | Query `at` = ISO timestamp; ledger replay |
+| `POST` | `/admin/prices/:symbol` | Bearer | `{ "price", "ts?" }` set mark + rematch book |
+| `POST` | `/admin/halt/:symbol` | Bearer | Manual trading halt |
+| `POST` | `/admin/resume/:symbol` | Bearer | Resume after halt |
+| `WS` | `/prices` | — | Socket.IO namespace; server emits `price` on updates |
+
+All HTTP routes share a **global 1 request/minute per IP** budget (`THROTTLE_LIMIT=1`) and return `429 { "error": "..." }` when exceeded. Full OpenAPI: [`openapi.yaml`](./openapi.yaml).
+
 ## Quick start
 
+> Tip: with the default **1 rpm** limit, run these one at a time (or raise `THROTTLE_LIMIT` in `.env` for local demos).
+
 ```bash
-# 1. Get a token (creates user with $100,000 cash)
-curl -s -X POST http://localhost:3000/auth/token \
+BASE=http://localhost:3000
+
+# GET /health
+curl -s "$BASE/health"
+
+# POST /auth/token
+TOKEN=$(curl -s -X POST "$BASE/auth/token" \
   -H 'content-type: application/json' \
-  -d '{"username":"alice"}'
+  -d '{"username":"alice"}' | jq -r .token)
 
-# 2. List assets
-curl -s http://localhost:3000/assets | jq .
+# GET /assets  and  GET /assets/:symbol
+curl -s "$BASE/assets" | jq .
+curl -s "$BASE/assets/vSOL" | jq .
 
-# 3. Calculator (no side effects)
-curl -s -X POST http://localhost:3000/calculator \
+# POST /calculator
+curl -s -X POST "$BASE/calculator" \
   -H 'content-type: application/json' \
-  -d '{"symbol":"vSOL","usdAmount":840}'
+  -d '{"symbol":"vSOL","usdAmount":840}' | jq .
 
-# 4. Place a market buy (Idempotency-Key required)
-curl -s -X POST http://localhost:3000/orders \
+# POST /orders  (Idempotency-Key required)
+curl -s -X POST "$BASE/orders" \
   -H "authorization: Bearer $TOKEN" \
   -H 'idempotency-key: demo-1' \
   -H 'content-type: application/json' \
-  -d '{"symbol":"vSOL","side":"buy","type":"market","quantity":2}'
+  -d '{"symbol":"vSOL","side":"buy","type":"market","quantity":2}' | jq .
 
-# 5. Portfolio + point-in-time history
-curl -s http://localhost:3000/portfolio -H "authorization: Bearer $TOKEN"
-curl -s "http://localhost:3000/portfolio/history?at=2026-06-01T12:00:00.000Z" \
-  -H "authorization: Bearer $TOKEN"
+# GET /portfolio  and  GET /portfolio/history?at=
+curl -s "$BASE/portfolio" -H "authorization: Bearer $TOKEN" | jq .
+curl -s "$BASE/portfolio/history?at=2026-06-01T12:00:00.000Z" \
+  -H "authorization: Bearer $TOKEN" | jq .
+
+# DELETE /orders/:id  (use a real resting limit order id)
+curl -s -X DELETE "$BASE/orders/ORDER_ID" \
+  -H "authorization: Bearer $TOKEN" | jq .
+
+# POST /admin/prices/:symbol
+curl -s -X POST "$BASE/admin/prices/vSOL" \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"price":420}' | jq .
+
+# POST /admin/halt/:symbol  and  POST /admin/resume/:symbol
+curl -s -X POST "$BASE/admin/halt/vSOL" -H "authorization: Bearer $TOKEN" | jq .
+curl -s -X POST "$BASE/admin/resume/vSOL" -H "authorization: Bearer $TOKEN" | jq .
+
+# WS /prices  (Socket.IO) — e.g. with a client connecting to namespace "/prices"
 ```
 
 ## Architecture decisions
@@ -86,26 +130,6 @@ curl -s "http://localhost:3000/portfolio/history?at=2026-06-01T12:00:00.000Z" \
 - **Error shape** — a global `HttpErrorFilter` normalizes every thrown exception to `{ error: string }` so the API contract stays stable regardless of Nest's default exception body shape.
 
 See `deps/Architecture.md`, `deps/Decisions.md`, and `deps/Thinking_Model.md` for deeper rationale.
-
-## API reference
-
-Full OpenAPI document: [`openapi.yaml`](./openapi.yaml).
-
-| Method | Path | Auth | Notes |
-|--------|------|------|-------|
-| POST | `/auth/token` | — | `{ username }` → JWT |
-| GET | `/assets` | — | List + price history |
-| GET | `/assets/:symbol` | — | Detail + history |
-| POST | `/calculator` | — | USD → shares; no side effects |
-| POST | `/orders` | Bearer | Requires `Idempotency-Key` |
-| DELETE | `/orders/:id` | Bearer | Cancel resting order |
-| GET | `/portfolio` | Bearer | Holdings, cost basis, P&L |
-| GET | `/portfolio/history?at=` | Bearer | Ledger replay as-of timestamp |
-| POST | `/admin/prices/:symbol` | Bearer | Set mark + match resting book |
-| POST | `/admin/halt/:symbol` | Bearer | Manual trading halt (per symbol) |
-| POST | `/admin/resume/:symbol` | Bearer | Resume after manual halt |
-| GET | `/health` | — | Liveness |
-| WS | `/prices` | — | Socket.IO namespace; `price` events on updates |
 
 ## Known limitations
 

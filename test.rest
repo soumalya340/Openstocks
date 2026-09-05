@@ -1,1 +1,331 @@
-### 
+### OpenStocks API — REST Client requests
+### Run with the "REST Client" VS Code extension (or any .rest-compatible client).
+### Start the server first: yarn dev  (or yarn build && yarn start)
+
+@baseUrl = http://localhost:3000
+@symbol = vSOL
+
+### Health check
+GET {{baseUrl}}/health
+
+### ============================================================
+### AUTH
+### ============================================================
+
+### Get a token (creates the user with $100,000 cash if new)
+# @name auth
+POST {{baseUrl}}/auth/token
+content-type: application/json
+
+{
+  "username": "alice"
+}
+
+### Second user, for cross-user matching / short-sell scenarios
+# @name auth2
+POST {{baseUrl}}/auth/token
+content-type: application/json
+
+{
+  "username": "bob"
+}
+
+### Capture tokens from the responses above for the requests below
+@token = {{auth.response.body.token}}
+@userId = {{auth.response.body.userId}}
+@token2 = {{auth2.response.body.token}}
+
+### Missing username -> 400
+POST {{baseUrl}}/auth/token
+content-type: application/json
+
+{
+  "username": ""
+}
+
+### ============================================================
+### MARKET DATA
+### ============================================================
+
+### List all assets + price history
+GET {{baseUrl}}/assets
+
+### Get one asset + history
+GET {{baseUrl}}/assets/{{symbol}}
+
+### Unknown symbol -> 404
+GET {{baseUrl}}/assets/NOPE
+
+### Calculator — USD to shares, no side effects
+POST {{baseUrl}}/calculator
+content-type: application/json
+
+{
+  "symbol": "{{symbol}}",
+  "usdAmount": 840
+}
+
+### Calculator — bad input -> 400
+POST {{baseUrl}}/calculator
+content-type: application/json
+
+{
+  "symbol": "{{symbol}}",
+  "usdAmount": -1
+}
+
+### ============================================================
+### ORDERS (auth + Idempotency-Key required)
+### ============================================================
+
+### Place a market buy
+# @name marketBuy
+POST {{baseUrl}}/orders
+authorization: Bearer {{token}}
+idempotency-key: demo-market-buy-1
+content-type: application/json
+
+{
+  "symbol": "{{symbol}}",
+  "side": "buy",
+  "type": "market",
+  "quantity": 2
+}
+
+@orderId = {{marketBuy.response.body.order.id}}
+
+### Replaying the same Idempotency-Key returns the same order (no double fill)
+POST {{baseUrl}}/orders
+authorization: Bearer {{token}}
+idempotency-key: demo-market-buy-1
+content-type: application/json
+
+{
+  "symbol": "{{symbol}}",
+  "side": "buy",
+  "type": "market",
+  "quantity": 2
+}
+
+### Missing Idempotency-Key -> 400
+POST {{baseUrl}}/orders
+authorization: Bearer {{token}}
+content-type: application/json
+
+{
+  "symbol": "{{symbol}}",
+  "side": "buy",
+  "type": "market",
+  "quantity": 1
+}
+
+### No auth -> 401
+POST {{baseUrl}}/orders
+idempotency-key: demo-no-auth
+content-type: application/json
+
+{
+  "symbol": "{{symbol}}",
+  "side": "buy",
+  "type": "market",
+  "quantity": 1
+}
+
+### Place a resting limit buy (below market — will not fill immediately)
+# @name limitBuy
+POST {{baseUrl}}/orders
+authorization: Bearer {{token}}
+idempotency-key: demo-limit-buy-1
+content-type: application/json
+
+{
+  "symbol": "{{symbol}}",
+  "side": "buy",
+  "type": "limit",
+  "quantity": 10,
+  "limitPrice": 400
+}
+
+@limitOrderId = {{limitBuy.response.body.order.id}}
+
+### Bob places a resting limit sell that crosses Alice's resting buy (cross-user match)
+POST {{baseUrl}}/orders
+authorization: Bearer {{token2}}
+idempotency-key: demo-limit-sell-1
+content-type: application/json
+
+{
+  "symbol": "{{symbol}}",
+  "side": "sell",
+  "type": "limit",
+  "quantity": 5,
+  "limitPrice": 400
+}
+
+### Cancel the resting limit buy
+DELETE {{baseUrl}}/orders/{{limitOrderId}}
+authorization: Bearer {{token}}
+
+### Cancel an already-filled/cancelled order -> 400
+DELETE {{baseUrl}}/orders/{{limitOrderId}}
+authorization: Bearer {{token}}
+
+### Cancel unknown order -> 404
+DELETE {{baseUrl}}/orders/00000000-0000-0000-0000-000000000000
+authorization: Bearer {{token}}
+
+### ============================================================
+### SHORT SELLING & MARGIN
+### Margin = 50% of short notional (MARGIN.INITIAL_PCT in src/trading/index.ts),
+### reserved from free cash and visible as `marginReserved` on the holding /
+### `reservedCash` on the order. No prior long position is required to short.
+### ============================================================
+
+### Bob opens a market short on vATL (no prior long position) — reserves margin
+# @name marketShort
+POST {{baseUrl}}/orders
+authorization: Bearer {{token2}}
+idempotency-key: demo-short-market-1
+content-type: application/json
+
+{
+  "symbol": "vATL",
+  "side": "sell",
+  "type": "market",
+  "quantity": 1
+}
+
+### Bob's portfolio now shows a negative vATL quantity with marginReserved > 0
+GET {{baseUrl}}/portfolio
+authorization: Bearer {{token2}}
+
+### Bob opens a resting limit short on vHLX — reservedCash on the order IS the margin
+# @name limitShort
+POST {{baseUrl}}/orders
+authorization: Bearer {{token2}}
+idempotency-key: demo-short-limit-1
+content-type: application/json
+
+{
+  "symbol": "vHLX",
+  "side": "sell",
+  "type": "limit",
+  "quantity": 5,
+  "limitPrice": 200
+}
+
+### A short big enough to exceed free cash after existing reservations -> 400
+### (Insufficient margin for short sell / short limit sell)
+POST {{baseUrl}}/orders
+authorization: Bearer {{token2}}
+idempotency-key: demo-short-too-big-1
+content-type: application/json
+
+{
+  "symbol": "vVAN",
+  "side": "sell",
+  "type": "market",
+  "quantity": 1000
+}
+
+### Cancel the resting limit short — releases its reservedCash (margin)
+DELETE {{baseUrl}}/orders/{{limitShort.response.body.order.id}}
+authorization: Bearer {{token2}}
+
+### Bob covers the market short (buy back vATL) — marginReserved drops back toward 0
+POST {{baseUrl}}/orders
+authorization: Bearer {{token2}}
+idempotency-key: demo-cover-1
+content-type: application/json
+
+{
+  "symbol": "vATL",
+  "side": "buy",
+  "type": "market",
+  "quantity": 1
+}
+
+### Confirm margin released after covering
+GET {{baseUrl}}/portfolio
+authorization: Bearer {{token2}}
+
+### NOTE: GBM price simulation (tickPrices/gbmNextPrice in src/market/index.ts) has
+### no HTTP trigger — it's only invoked in tests and would need a scheduler/endpoint
+### wired up to exercise here. The only price-mutation route is admin/prices below.
+
+### ============================================================
+### PORTFOLIO
+### ============================================================
+
+### Current portfolio (live)
+GET {{baseUrl}}/portfolio
+authorization: Bearer {{token}}
+
+### No auth -> 401
+GET {{baseUrl}}/portfolio
+
+### Point-in-time portfolio via ledger replay
+GET {{baseUrl}}/portfolio/history?at=2026-06-01T12:00:00.000Z
+authorization: Bearer {{token}}
+
+### Missing 'at' query param -> 400
+GET {{baseUrl}}/portfolio/history
+authorization: Bearer {{token}}
+
+### ============================================================
+### ADMIN (auth required)
+### ============================================================
+
+### Set price explicitly + match resting limit orders that now cross
+POST {{baseUrl}}/admin/prices/{{symbol}}
+authorization: Bearer {{token}}
+content-type: application/json
+
+{
+  "price": 425.5
+}
+
+### Set price with an explicit timestamp (useful for circuit-breaker scenarios)
+POST {{baseUrl}}/admin/prices/{{symbol}}
+authorization: Bearer {{token}}
+content-type: application/json
+
+{
+  "price": 500,
+  "ts": "2026-06-01T12:00:00.000Z"
+}
+
+### Halt trading on a symbol
+POST {{baseUrl}}/admin/halt/{{symbol}}
+authorization: Bearer {{token}}
+content-type: application/json
+
+{}
+
+### Orders on a halted symbol are rejected with 503
+POST {{baseUrl}}/orders
+authorization: Bearer {{token}}
+idempotency-key: demo-halted-1
+content-type: application/json
+
+{
+  "symbol": "{{symbol}}",
+  "side": "buy",
+  "type": "market",
+  "quantity": 1
+}
+
+### Resume trading on a symbol
+POST {{baseUrl}}/admin/resume/{{symbol}}
+authorization: Bearer {{token}}
+content-type: application/json
+
+{}
+
+### ============================================================
+### RATE LIMITING
+### Default: THROTTLE_LIMIT requests per THROTTLE_TTL_MS window per IP (see .env).
+### Fire this request repeatedly (or use the REST Client "Run" loop) to trigger a 429.
+### ============================================================
+
+GET {{baseUrl}}/health
