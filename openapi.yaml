@@ -1,0 +1,192 @@
+openapi: 3.0.3
+info:
+  title: OpenStocks API
+  version: 1.0.0
+  description: Tokenized pre-IPO trading platform (take-home).
+servers:
+  - url: http://localhost:3000
+paths:
+  /health:
+    get:
+      summary: Liveness
+      responses:
+        "200":
+          description: OK
+  /auth/token:
+    post:
+      summary: Issue JWT for a username (creates user with $100k cash if new)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username:
+                  type: string
+      responses:
+        "201":
+          description: Token issued
+        "400":
+          description: Missing username
+  /assets:
+    get:
+      summary: List simulated assets with price history
+      responses:
+        "200":
+          description: Asset list
+  /assets/{symbol}:
+    get:
+      summary: Asset detail + history
+      parameters:
+        - in: path
+          name: symbol
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Asset
+        "404":
+          description: Not found
+  /calculator:
+    post:
+      summary: Convert USD amount to shares (no side effects)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [symbol, usdAmount]
+              properties:
+                symbol:
+                  type: string
+                usdAmount:
+                  type: number
+      responses:
+        "200":
+          description: Shares quote
+        "400":
+          description: Bad input
+  /orders:
+    post:
+      summary: Place market or limit order
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [symbol, side, type, quantity]
+              properties:
+                symbol:
+                  type: string
+                side:
+                  type: string
+                  enum: [buy, sell]
+                type:
+                  type: string
+                  enum: [market, limit]
+                quantity:
+                  type: number
+                limitPrice:
+                  type: number
+      responses:
+        "201":
+          description: Order accepted
+        "400":
+          description: Validation / insufficient funds
+        "401":
+          description: Unauthorized
+        "503":
+          description: Circuit breaker open
+  /orders/{id}:
+    delete:
+      summary: Cancel a resting order
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Cancelled
+        "400":
+          description: Not cancellable
+        "404":
+          description: Not found
+  /portfolio:
+    get:
+      summary: Current holdings, cost basis, P&L
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Portfolio
+        "401":
+          description: Unauthorized
+  /portfolio/history:
+    get:
+      summary: Reconstruct portfolio at timestamp from ledger
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: at
+          required: true
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Reconstructed portfolio
+        "400":
+          description: Missing/invalid at
+  /admin/prices/{symbol}:
+    post:
+      summary: Set simulated price and match resting limits
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: symbol
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [price]
+              properties:
+                price:
+                  type: number
+                ts:
+                  type: string
+                  format: date-time
+                fillFraction:
+                  type: number
+                  description: Portion of remaining qty to fill (partial fills)
+      responses:
+        "200":
+          description: Updated
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
