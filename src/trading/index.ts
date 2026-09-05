@@ -521,6 +521,8 @@ export function cancelOrder(
        WHERE id = ?`
     ).run(now, orderId);
 
+    // Single release path: ORDER_CANCELLED carries releasedCash/Shares.
+    // Do not also emit RESERVATION_RELEASE — portfolio replay would double-decrement.
     appendLedger(db, {
       type: "ORDER_CANCELLED",
       userId,
@@ -533,20 +535,6 @@ export function cancelOrder(
       },
       ts: now,
     });
-
-    if (order.reservedCash > 0 || order.reservedShares > 0) {
-      appendLedger(db, {
-        type: "RESERVATION_RELEASE",
-        userId,
-        symbol: order.symbol,
-        payload: {
-          orderId,
-          releasedCash: order.reservedCash,
-          releasedShares: order.reservedShares,
-        },
-        ts: now,
-      });
-    }
   });
   tx();
   return { ok: true, order: getOrder(db, orderId)! };

@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import request from "supertest";
 import { createTestApp, login, auth } from "./helpers.js";
 import type { Db } from "../src/db.js";
-import { placeOrder } from "../src/trading/index.js";
+import { cancelOrder, placeOrder } from "../src/trading/index.js";
 
 describe("portfolio + ledger history", () => {
   let db: Db;
@@ -91,6 +91,79 @@ describe("portfolio + ledger history", () => {
       .set(auth(token))
       .expect(200);
     expect(live.body.portfolio.cash).toBe(later.body.portfolio.cash);
+  });
+
+  it("history reservedCash matches live after cancelling one of two resting limit buys", async () => {
+    const ctx = createTestApp();
+    db = ctx.db;
+    const { token, userId } = await login(ctx.app, "two-limits");
+
+    const t0 = "2026-07-01T09:00:00.000Z";
+    const t1 = "2026-07-01T10:00:00.000Z";
+    const t2 = "2026-07-01T10:05:00.000Z";
+    const t3 = "2026-07-01T10:10:00.000Z";
+    const tAfter = "2026-07-01T10:15:00.000Z";
+    db.prepare(`UPDATE ledger SET ts = ? WHERE user_id = ? AND type = 'USER_CREATED'`).run(
+      t0,
+      userId
+    );
+    db.prepare(`UPDATE users SET created_at = ? WHERE id = ?`).run(t0, userId);
+
+    // Two resting limit buys below market (vSOL @ 420): reserve 2000 each
+    const a = placeOrder(db, {
+      userId,
+      symbol: "vSOL",
+      side: "buy",
+      type: "limit",
+      quantity: 5,
+      limitPrice: 400,
+      idempotencyKey: "lim-a",
+      now: t1,
+    });
+    const b = placeOrder(db, {
+      userId,
+      symbol: "vSOL",
+      side: "buy",
+      type: "limit",
+      quantity: 5,
+      limitPrice: 400,
+      idempotencyKey: "lim-b",
+      now: t2,
+    });
+    expect(a.ok && b.ok).toBe(true);
+    if (!a.ok || !b.ok) return;
+
+    expect(a.order.reservedCash).toBe(2000);
+    expect(b.order.reservedCash).toBe(2000);
+
+    const cancelled = cancelOrder(db, userId, a.order.id, t3);
+    expect(cancelled.ok).toBe(true);
+    if (cancelled.ok) {
+      expect(cancelled.order.status).toBe("cancelled");
+    }
+
+    // Assert only one cancel release event was written (no duplicate RESERVATION_RELEASE).
+    const cancelEvents = db
+      .prepare(
+        `SELECT type FROM ledger WHERE user_id = ? AND ts = ? AND type IN ('ORDER_CANCELLED', 'RESERVATION_RELEASE')`
+      )
+      .all(userId, t3) as Array<{ type: string }>;
+    expect(cancelEvents.map((e) => e.type)).toEqual(["ORDER_CANCELLED"]);
+
+    const live = await request(ctx.app)
+      .get("/portfolio")
+      .set(auth(token))
+      .expect(200);
+    expect(live.body.portfolio.reservedCash).toBe(2000);
+
+    const hist = await request(ctx.app)
+      .get(`/portfolio/history?at=${encodeURIComponent(tAfter)}`)
+      .set(auth(token))
+      .expect(200);
+
+    expect(hist.body.reconstructedFrom).toBe("ledger");
+    expect(hist.body.portfolio.reservedCash).toBe(live.body.portfolio.reservedCash);
+    expect(hist.body.portfolio.reservedCash).toBe(2000);
   });
 
   it("history before user creation returns empty portfolio", async () => {
