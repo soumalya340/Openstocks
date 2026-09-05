@@ -7,3 +7,4 @@ data/
 coverage/
 .env
 .env.local
+deps
