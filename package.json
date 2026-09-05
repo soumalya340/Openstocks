@@ -5,7 +5,9 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "prestart": "npm run build",
     "start": "node dist/src/main.js",
+    "start:prod": "node dist/src/main.js",
     "dev": "tsx watch src/main.ts",
     "test": "vitest run",
     "test:watch": "vitest",

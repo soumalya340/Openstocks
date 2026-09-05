@@ -14,23 +14,34 @@ Take-home implementation of a simplified platform where users trade tokenized sh
 ## Setup
 
 ```bash
-yarn install           # also runs `tsc` via postinstall → dist/src/main.js
+npm install            # also runs `tsc` via postinstall → dist/src/main.js
+# or: yarn install
 cp .env.example .env   # edit secrets/paths as needed
-yarn test              # Vitest suite
-yarn start             # node dist/src/main.js (http://localhost:$PORT)
-yarn dev               # tsx watch for local development
+npm test               # Vitest suite
+npm start              # builds then runs node dist/src/main.js
+npm run dev            # tsx watch for local development
 ```
 
-### VPS deploy
+### VPS deploy (tmux)
 
-Run the built app under `tmux` (or any process supervisor of your choice) on your own host:
+`dist/` is **not** in git — you must install + build on the server before start:
 
 ```bash
-yarn install && yarn build
+cd ~/Openstocks
+git pull
+npm install            # installs deps + postinstall compiles TypeScript
+cp -n .env.example .env && nano .env   # first time only
+npm start              # runs `prestart` → build, then node dist/src/main.js
+
+# or explicitly:
+npm run build && npm run start:prod
+
 tmux new -s openstocks
-node dist/src/main.js
+npm start
 # Ctrl-B then D to detach; `tmux attach -t openstocks` to reattach
 ```
+
+If you see `Cannot find module '.../dist/src/main.js'`, run `npm run build` once and retry.
 
 Environment variables are loaded from `.env` via `dotenv` (`src/env.ts`):
 
