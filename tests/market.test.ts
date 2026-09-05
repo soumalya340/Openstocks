@@ -2,17 +2,20 @@ import { describe, it, expect, afterEach } from "vitest";
 import request from "supertest";
 import { createTestApp, login, auth } from "./helpers.js";
 import type { Db } from "../src/db.js";
+import type { INestApplication } from "@nestjs/common";
 
 describe("market data + calculator", () => {
   let db: Db;
+  let nestApp: INestApplication | undefined;
 
-  afterEach(() => {
-    db?.close();
+  afterEach(async () => {
+    await nestApp?.close();
   });
 
   it("GET /assets returns the four seed assets with expected prices", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const res = await request(ctx.app).get("/assets").expect(200);
     const symbols = res.body.assets.map((a: { symbol: string }) => a.symbol).sort();
     expect(symbols).toEqual(["vATL", "vHLX", "vSOL", "vVAN"]);
@@ -31,8 +34,9 @@ describe("market data + calculator", () => {
   });
 
   it("GET /assets/:symbol returns detail + history", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const res = await request(ctx.app).get("/assets/vHLX").expect(200);
     expect(res.body.asset.symbol).toBe("vHLX");
     expect(res.body.asset.price).toBe(180.25);
@@ -40,14 +44,16 @@ describe("market data + calculator", () => {
   });
 
   it("GET /assets/:symbol 404s unknown", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     await request(ctx.app).get("/assets/NOPE").expect(404);
   });
 
   it("POST /calculator converts USD to shares with no side effects", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token } = await login(ctx.app);
     // Ensure a user exists so we can detect cash mutation
     const before = await request(ctx.app)
@@ -74,8 +80,9 @@ describe("market data + calculator", () => {
   });
 
   it("POST /calculator rejects bad input", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     await request(ctx.app)
       .post("/calculator")
       .send({ symbol: "vSOL", usdAmount: -1 })

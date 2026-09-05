@@ -1,12 +1,27 @@
+import "reflect-metadata";
 import request from "supertest";
 import type { Express } from "express";
-import { openDatabase, type Db } from "../src/db.js";
-import { createApp } from "../src/app.js";
+import { Test } from "@nestjs/testing";
+import type { INestApplication } from "@nestjs/common";
+import { AppModule } from "../src/app.module.js";
+import { DB_CONNECTION } from "../src/database/database.tokens.js";
+import type { Db } from "../src/db.js";
 
-export function createTestApp(): { app: Express; db: Db } {
-  const db = openDatabase(":memory:");
-  const app = createApp(db);
-  return { app, db };
+export async function createTestApp(): Promise<{
+  app: Express;
+  db: Db;
+  nestApp: INestApplication;
+}> {
+  const moduleRef = await Test.createTestingModule({
+    imports: [AppModule.forRoot(":memory:")],
+  }).compile();
+
+  const nestApp = moduleRef.createNestApplication();
+  await nestApp.init();
+
+  const db = moduleRef.get<Db>(DB_CONNECTION);
+  const app = nestApp.getHttpAdapter().getInstance() as Express;
+  return { app, db, nestApp };
 }
 
 export async function login(

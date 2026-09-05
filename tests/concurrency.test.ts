@@ -2,17 +2,20 @@ import { describe, it, expect, afterEach } from "vitest";
 import request from "supertest";
 import { createTestApp, login, auth } from "./helpers.js";
 import type { Db } from "../src/db.js";
+import type { INestApplication } from "@nestjs/common";
 
 describe("concurrency", () => {
   let db: Db;
+  let nestApp: INestApplication | undefined;
 
-  afterEach(() => {
-    db?.close();
+  afterEach(async () => {
+    await nestApp?.close();
   });
 
   it("handles concurrent distinct order placements without corrupting cash/holdings", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token } = await login(ctx.app, "racer");
 
     // 10 concurrent market buys of 1 vATL each @ 95.5 → total cost 955
@@ -52,8 +55,9 @@ describe("concurrency", () => {
   });
 
   it("concurrent replays of the same Idempotency-Key do not double-fill", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token } = await login(ctx.app, "idem-racer");
 
     const jobs = Array.from({ length: 8 }, () =>

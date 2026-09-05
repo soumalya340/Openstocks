@@ -1,7 +1,7 @@
 import type { Db } from "../db.js";
 import { listLedgerUpTo } from "../ledger/index.js";
 import { getAsset, listAssets } from "../market/index.js";
-import { INITIAL_CASH } from "../auth/index.js";
+import { INITIAL_CASH } from "../auth/auth.constants.js";
 import type { Holding, LedgerEvent, PortfolioSnapshot } from "../types.js";
 
 function roundMoney(n: number): number {

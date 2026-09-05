@@ -2,24 +2,28 @@ import { describe, it, expect, afterEach } from "vitest";
 import request from "supertest";
 import { createTestApp, login, auth } from "./helpers.js";
 import type { Db } from "../src/db.js";
+import type { INestApplication } from "@nestjs/common";
 import { cancelOrder, placeOrder } from "../src/trading/index.js";
 
 describe("portfolio + ledger history", () => {
   let db: Db;
+  let nestApp: INestApplication | undefined;
 
-  afterEach(() => {
-    db?.close();
+  afterEach(async () => {
+    await nestApp?.close();
   });
 
   it("GET /portfolio requires auth", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     await request(ctx.app).get("/portfolio").expect(401);
   });
 
   it("reconstructs portfolio at a past timestamp from the ledger", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token, userId } = await login(ctx.app, "historian");
 
     // Backdate USER_CREATED so it precedes the trade timeline we replay.
@@ -94,8 +98,9 @@ describe("portfolio + ledger history", () => {
   });
 
   it("history reservedCash matches live after cancelling one of two resting limit buys", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token, userId } = await login(ctx.app, "two-limits");
 
     const t0 = "2026-07-01T09:00:00.000Z";
@@ -167,8 +172,9 @@ describe("portfolio + ledger history", () => {
   });
 
   it("history before user creation returns empty portfolio", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token } = await login(ctx.app, "newbie");
     const early = await request(ctx.app)
       .get(`/portfolio/history?at=${encodeURIComponent("2000-01-01T00:00:00.000Z")}`)

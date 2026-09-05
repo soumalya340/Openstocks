@@ -14,23 +14,23 @@ Take-home implementation of a simplified platform where users trade tokenized sh
 ## Setup
 
 ```bash
-yarn install           # also runs `tsc` via postinstall → dist/src/index.js
+yarn install           # also runs `tsc` via postinstall → dist/src/main.js
 cp .env.example .env   # edit secrets/paths as needed
 yarn test              # Vitest suite
-yarn start             # node dist/src/index.js (http://localhost:$PORT)
+yarn start             # node dist/src/main.js (http://localhost:$PORT)
 yarn dev               # tsx watch for local development
-yarn check:live        # hit every API route on Render; console.log each result
 ```
 
-`yarn check:live` defaults to `https://openstocks-2r66.onrender.com` (override with `BASE_URL`). Each connection prints JSON with `method`, `path`, `status`, and `body` (or `error`).
+### VPS deploy
 
-### Render deploy
+Run the built app under `tmux` (or any process supervisor of your choice) on your own host:
 
-Build Command: `yarn --frozen-lockfile install` (postinstall compiles TypeScript)  
-Start Command: `node dist/src/index.js`  
-Set env vars in the Render dashboard: `JWT_SECRET`, optional `DB_PATH` (Render injects `PORT`).
-
-A `render.yaml` Blueprint is included if you prefer Infrastructure-as-Code.
+```bash
+yarn install && yarn build
+tmux new -s openstocks
+node dist/src/main.js
+# Ctrl-B then D to detach; `tmux attach -t openstocks` to reattach
+```
 
 Environment variables are loaded from `.env` via `dotenv` (`src/env.ts`):
 
@@ -73,11 +73,12 @@ curl -s "http://localhost:3000/portfolio/history?at=2026-06-01T12:00:00.000Z" \
 
 ## Architecture decisions
 
-- **Express + TypeScript** — Express was already in the repo; NestJS/Fastify preference noted but not worth a rewrite for this scope.
+- **NestJS + TypeScript** — modules/controllers/providers around Nest's DI container, running on `@nestjs/platform-express` under the hood.
 - **SQLite (`better-sqlite3`)** — Assignment prefers PostgreSQL; `psql` is unavailable here. SQLite keeps relational ledger semantics and zero-ops local runs. Schema is Postgres-portable.
 - **Append-only ledger** — `GET /portfolio/history?at=` replays ledger events; live `users`/`holdings` tables are a materialized convenience only.
 - **Matching** — Market orders fill at mid; limit orders reserve funds/shares and fill when mid crosses (partial fills supported). Full multi-user CLOB is a stretch goal.
-- **Auth** — Lightweight JWT via `POST /auth/token`.
+- **Auth** — Lightweight JWT via `POST /auth/token`, enforced with a Nest `AuthGuard`.
+- **Error shape** — a global `HttpErrorFilter` normalizes every thrown exception to `{ error: string }` so the API contract stays stable regardless of Nest's default exception body shape.
 
 See `deps/Architecture.md`, `deps/Decisions.md`, and `deps/Thinking_Model.md` for deeper rationale.
 

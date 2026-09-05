@@ -2,19 +2,22 @@ import { describe, it, expect, afterEach } from "vitest";
 import request from "supertest";
 import { createTestApp, login, auth } from "./helpers.js";
 import type { Db } from "../src/db.js";
+import type { INestApplication } from "@nestjs/common";
 import { setPrice } from "../src/market/index.js";
 import { matchOpenLimits } from "../src/trading/index.js";
 
 describe("trading engine", () => {
   let db: Db;
+  let nestApp: INestApplication | undefined;
 
-  afterEach(() => {
-    db?.close();
+  afterEach(async () => {
+    await nestApp?.close();
   });
 
   it("rejects orders without auth", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     await request(ctx.app)
       .post("/orders")
       .set("Idempotency-Key", "k1")
@@ -23,8 +26,9 @@ describe("trading engine", () => {
   });
 
   it("rejects orders without Idempotency-Key", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token } = await login(ctx.app);
     const res = await request(ctx.app)
       .post("/orders")
@@ -35,8 +39,9 @@ describe("trading engine", () => {
   });
 
   it("places a market buy and updates portfolio", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token } = await login(ctx.app);
     const res = await request(ctx.app)
       .post("/orders")
@@ -61,8 +66,9 @@ describe("trading engine", () => {
   });
 
   it("replays identical response for same Idempotency-Key (no double fill)", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token } = await login(ctx.app);
     const body = { symbol: "vATL", side: "buy", type: "market", quantity: 1 };
     const a = await request(ctx.app)
@@ -90,8 +96,9 @@ describe("trading engine", () => {
   });
 
   it("partially fills a limit order then cancels the remainder", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token } = await login(ctx.app);
 
     // Limit buy below market — rests
@@ -148,8 +155,9 @@ describe("trading engine", () => {
   });
 
   it("trips circuit breaker after >15% move in 60s and rejects new orders", async () => {
-    const ctx = createTestApp();
+    const ctx = await createTestApp();
     db = ctx.db;
+    nestApp = ctx.nestApp;
     const { token } = await login(ctx.app);
 
     // Use wall-clock-relative stamps so the 30s halt is still open when we place.
