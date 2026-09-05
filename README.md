@@ -14,11 +14,20 @@ Take-home implementation of a simplified platform where users trade tokenized sh
 ## Setup
 
 ```bash
-yarn install
+yarn install           # also runs `tsc` via postinstall → dist/src/index.js
 cp .env.example .env   # edit secrets/paths as needed
 yarn test              # Vitest suite
-yarn start             # API on http://localhost:$PORT
+yarn start             # node dist/src/index.js (http://localhost:$PORT)
+yarn dev               # tsx watch for local development
 ```
+
+### Render deploy
+
+Build Command: `yarn --frozen-lockfile install` (postinstall compiles TypeScript)  
+Start Command: `node dist/src/index.js`  
+Set env vars in the Render dashboard: `JWT_SECRET`, optional `DB_PATH` (Render injects `PORT`).
+
+A `render.yaml` Blueprint is included if you prefer Infrastructure-as-Code.
 
 Environment variables are loaded from `.env` via `dotenv` (`src/env.ts`):
 
