@@ -10,15 +10,18 @@ import {
   Param,
   Post,
 } from "@nestjs/common";
+import { ApiBody, ApiOperation, ApiParam, ApiTags } from "@nestjs/swagger";
 import type { Db } from "../db.js";
 import { DB_CONNECTION } from "../database/database.tokens.js";
 import { calculateShares, getAsset, getPriceHistory, listAssets } from "./index.js";
 
+@ApiTags("market")
 @Controller()
 export class MarketController {
   constructor(@Inject(DB_CONNECTION) private readonly db: Db) {}
 
   @Get("assets")
+  @ApiOperation({ summary: "List all simulated assets with price history" })
   async listAssets() {
     const listed = await listAssets(this.db);
     const assets = await Promise.all(
@@ -31,6 +34,8 @@ export class MarketController {
   }
 
   @Get("assets/:symbol")
+  @ApiOperation({ summary: "Get one asset's detail and price history" })
+  @ApiParam({ name: "symbol", example: "vSOL" })
   async getAsset(@Param("symbol") symbol: string) {
     const asset = await getAsset(this.db, String(symbol));
     if (!asset) {
@@ -44,6 +49,17 @@ export class MarketController {
 
   @Post("calculator")
   @HttpCode(200)
+  @ApiOperation({ summary: "Convert a USD amount to shares (no side effects)" })
+  @ApiBody({
+    schema: {
+      type: "object",
+      required: ["symbol", "usdAmount"],
+      properties: {
+        symbol: { type: "string", example: "vSOL" },
+        usdAmount: { type: "number", example: 840 },
+      },
+    },
+  })
   async calculate(@Body() body: { symbol?: unknown; usdAmount?: unknown }) {
     const symbol = String(body?.symbol ?? "");
     const usdAmount = Number(body?.usdAmount);

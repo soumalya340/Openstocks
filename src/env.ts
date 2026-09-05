@@ -4,37 +4,35 @@ import path from "node:path";
 /** Load `.env` once, before any module reads process.env. */
 loadDotenv({ path: path.resolve(process.cwd(), ".env"), quiet: true });
 
-function normalizeDatabaseUrl(raw: string | undefined): string | null {
-  const url = raw?.trim();
-  if (!url) return null;
+function requireDatabaseUrl(): string {
+  const url = process.env.DATABASE_URL?.trim();
+  if (!url) {
+    throw new Error(
+      "DATABASE_URL is required (Postgres / Supabase connection string). Set it in .env."
+    );
+  }
   return url;
 }
 
 export const env = {
   PORT: Number(process.env.PORT ?? 3000),
-  DB_PATH:
-    process.env.DB_PATH ?? path.join(process.cwd(), "data", "openstocks.sqlite"),
-  /**
-   * Supabase / Postgres URL. When set, the API uses Postgres instead of SQLite.
-   * Encode special characters in the password (e.g. `@` → `%40`).
-   */
-  DATABASE_URL: normalizeDatabaseUrl(process.env.DATABASE_URL),
+  /** Postgres / Supabase connection string (required for production). Encode `@` in passwords as `%40`. */
+  get DATABASE_URL(): string {
+    return requireDatabaseUrl();
+  },
   SUPABASE_URL: process.env.SUPABASE_URL?.trim() || null,
   JWT_SECRET: process.env.JWT_SECRET ?? "openstocks-dev-secret",
-  /** Sliding window length for HTTP rate limiting (ms). */
   THROTTLE_TTL_MS: Number(process.env.THROTTLE_TTL_MS ?? 60_000),
-  /** Max requests per IP per TTL window (global across routes). */
   THROTTLE_LIMIT: Number(process.env.THROTTLE_LIMIT ?? 100),
 } as const;
 
-export function describeDatabase(): string {
-  if (env.DATABASE_URL) {
-    try {
-      const u = new URL(env.DATABASE_URL);
-      return `Postgres ${u.hostname}${u.pathname} (Supabase/DATABASE_URL)`;
-    } catch {
-      return "Postgres (DATABASE_URL)";
-    }
+export function describeDatabase(databaseUrl?: string): string {
+  const url = databaseUrl ?? process.env.DATABASE_URL?.trim();
+  if (!url) return "Postgres";
+  try {
+    const u = new URL(url);
+    return `Postgres ${u.hostname}${u.pathname}`;
+  } catch {
+    return "Postgres";
   }
-  return `SQLite ${env.DB_PATH}`;
 }

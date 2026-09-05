@@ -85,22 +85,13 @@ export async function saveIdempotentResponse(
 ): Promise<void> {
   const createdAt = new Date().toISOString();
   const json = JSON.stringify(body);
-  if (db.driver === "postgres") {
-    await db
-      .prepare(
-        `INSERT INTO idempotency (user_id, key, status_code, body, created_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (user_id, key) DO UPDATE SET status_code = EXCLUDED.status_code, body = EXCLUDED.body, created_at = EXCLUDED.created_at`
-      )
-      .run(userId, key, statusCode, json, createdAt);
-  } else {
-    await db
-      .prepare(
-        `INSERT OR REPLACE INTO idempotency (user_id, key, status_code, body, created_at)
-         VALUES (?, ?, ?, ?, ?)`
-      )
-      .run(userId, key, statusCode, json, createdAt);
-  }
+  await db
+    .prepare(
+      `INSERT INTO idempotency (user_id, key, status_code, body, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (user_id, key) DO UPDATE SET status_code = EXCLUDED.status_code, body = EXCLUDED.body, created_at = EXCLUDED.created_at`
+    )
+    .run(userId, key, statusCode, json, createdAt);
 }
 
 async function getUserCash(db: Db, userId: string): Promise<number> {
@@ -172,22 +163,16 @@ async function upsertHolding(
   costBasis: number,
   marginReserved: number
 ): Promise<void> {
-  const existing = await getHoldingRow(db, userId, symbol);
-  if (existing) {
-    await db
-      .prepare(
-        `UPDATE holdings SET quantity = ?, cost_basis = ?, margin_reserved = ?
-       WHERE user_id = ? AND symbol = ?`
-      )
-      .run(quantity, costBasis, marginReserved, userId, symbol);
-  } else {
-    await db
-      .prepare(
-        `INSERT INTO holdings (user_id, symbol, quantity, cost_basis, margin_reserved)
-       VALUES (?, ?, ?, ?, ?)`
-      )
-      .run(userId, symbol, quantity, costBasis, marginReserved);
-  }
+  await db
+    .prepare(
+      `INSERT INTO holdings (user_id, symbol, quantity, cost_basis, margin_reserved)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (user_id, symbol) DO UPDATE SET
+         quantity = EXCLUDED.quantity,
+         cost_basis = EXCLUDED.cost_basis,
+         margin_reserved = EXCLUDED.margin_reserved`
+    )
+    .run(userId, symbol, quantity, costBasis, marginReserved);
 }
 
 /**
@@ -596,7 +581,24 @@ export type PlaceOrderResult =
   | { ok: true; order: Order; statusCode: number }
   | { ok: false; error: string; statusCode: number };
 
+/** Process-wide lock so concurrent placeOrder calls cannot interleave RMW on holdings. */
+let placeOrderGate: Promise<void> = Promise.resolve();
+
 export async function placeOrder(db: Db, input: PlaceOrderInput): Promise<PlaceOrderResult> {
+  let release!: () => void;
+  const prev = placeOrderGate;
+  placeOrderGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await prev;
+  try {
+    return await placeOrderLocked(db, input);
+  } finally {
+    release();
+  }
+}
+
+async function placeOrderLocked(db: Db, input: PlaceOrderInput): Promise<PlaceOrderResult> {
   const now = input.now ?? new Date().toISOString();
   const { userId, symbol, side, type, quantity, idempotencyKey } = input;
   const limitPrice = input.limitPrice ?? null;
@@ -766,8 +768,8 @@ export async function placeOrder(db: Db, input: PlaceOrderInput): Promise<PlaceO
           order.idempotencyKey
         );
     } catch (err) {
-      const msg = String((err as Error).message ?? err);
-      if (msg.includes("UNIQUE") && msg.includes("idempotency")) {
+      const msg = String((err as Error).message ?? err).toLowerCase();
+      if (msg.includes("unique") && msg.includes("idempotency")) {
         const existing = (await db
           .prepare(`SELECT * FROM orders WHERE user_id = ? AND idempotency_key = ?`)
           .get(userId, idempotencyKey)) as Parameters<typeof rowToOrder>[0];

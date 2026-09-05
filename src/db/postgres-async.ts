@@ -34,19 +34,26 @@ class PgStatement implements PreparedStatement {
 }
 
 export class PostgresAsyncDb implements Db {
-  readonly driver = "postgres" as const;
   private readonly pool: pg.Pool;
-  /** When set, prepare/exec run on this client (inside a transaction). */
+  private readonly ownsPool: boolean;
   private txClient: pg.PoolClient | null = null;
+  /** Serialize top-level transactions (avoids lost updates under concurrent HTTP). */
+  private writeGate: Promise<void> = Promise.resolve();
 
-  constructor(connectionString: string) {
-    this.pool = new Pool({
-      connectionString,
-      ssl: connectionString.includes("localhost")
-        ? undefined
-        : { rejectUnauthorized: false },
-      max: 10,
-    });
+  constructor(connectionStringOrPool: string | pg.Pool) {
+    if (typeof connectionStringOrPool === "string") {
+      this.ownsPool = true;
+      this.pool = new Pool({
+        connectionString: connectionStringOrPool,
+        ssl: /localhost|127\.0\.0\.1/.test(connectionStringOrPool)
+          ? undefined
+          : { rejectUnauthorized: false },
+        max: 10,
+      });
+    } else {
+      this.ownsPool = false;
+      this.pool = connectionStringOrPool;
+    }
   }
 
   prepare(sql: string): PreparedStatement {
@@ -61,9 +68,14 @@ export class PostgresAsyncDb implements Db {
 
   async transaction<T>(fn: () => Promise<T> | T): Promise<T> {
     if (this.txClient) {
-      // Nested: reuse current client (savepoints would be nicer; fine for take-home).
       return await fn();
     }
+    let release!: () => void;
+    const prev = this.writeGate;
+    this.writeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prev;
     const client = await this.pool.connect();
     this.txClient = client;
     try {
@@ -79,10 +91,13 @@ export class PostgresAsyncDb implements Db {
     } finally {
       this.txClient = null;
       client.release();
+      release();
     }
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    if (this.ownsPool) {
+      await this.pool.end();
+    }
   }
 }

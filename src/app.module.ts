@@ -1,6 +1,7 @@
 import { DynamicModule, Module } from "@nestjs/common";
 import { APP_FILTER, APP_GUARD } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
+import type pg from "pg";
 import { DatabaseModule } from "./database/database.module.js";
 import { HealthModule } from "./health/health.module.js";
 import { AuthModule } from "./auth/auth.module.js";
@@ -11,21 +12,15 @@ import { HttpErrorFilter } from "./common/http-error.filter.js";
 import { env } from "./env.js";
 
 export interface AppModuleOptions {
-  dbPath?: string;
-  /** Pass `null` in tests to force SQLite even if DATABASE_URL is set. */
-  databaseUrl?: string | null;
+  databaseUrl?: string;
+  pool?: pg.Pool;
   throttleTtlMs?: number;
   throttleLimit?: number;
 }
 
 @Module({})
 export class AppModule {
-  static forRoot(dbPathOrOpts?: string | AppModuleOptions): DynamicModule {
-    const opts: AppModuleOptions =
-      typeof dbPathOrOpts === "string" || dbPathOrOpts === undefined
-        ? { dbPath: dbPathOrOpts }
-        : dbPathOrOpts;
-
+  static forRoot(opts: AppModuleOptions = {}): DynamicModule {
     const ttl = opts.throttleTtlMs ?? env.THROTTLE_TTL_MS;
     const limit = opts.throttleLimit ?? env.THROTTLE_LIMIT;
 
@@ -37,15 +32,13 @@ export class AppModule {
             name: "default",
             ttl,
             limit,
-            // Global per-IP budget (not per-route).
             generateKey: (_context, tracker, throttlerName) =>
               `global:${throttlerName}:${tracker}`,
           },
         ]),
         DatabaseModule.forRoot({
-          dbPath: opts.dbPath ?? env.DB_PATH,
-          databaseUrl:
-            opts.databaseUrl === undefined ? env.DATABASE_URL : opts.databaseUrl,
+          databaseUrl: opts.databaseUrl,
+          pool: opts.pool,
         }),
         HealthModule,
         AuthModule,

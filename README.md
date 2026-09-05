@@ -48,10 +48,9 @@ Environment variables are loaded from `.env` via `dotenv` (`src/env.ts`):
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `PORT` | `3000` | HTTP port |
-| `DATABASE_URL` | _(empty)_ | **Supabase/Postgres connection string** — when set, the API uses Postgres (not SQLite). Encode `@` in passwords as `%40`. |
-| `SUPABASE_URL` | _(empty)_ | Optional; REST client URL (SQL uses `DATABASE_URL`, not this) |
+| `DATABASE_URL` | **required** | Postgres / Supabase connection string. Encode `@` in passwords as `%40`. |
+| `SUPABASE_URL` | _(empty)_ | Optional; REST client URL (SQL uses `DATABASE_URL`) |
 | `SUPABASE_SERVICE_ROLE_KEY` | _(empty)_ | Optional; not required for direct SQL via `pg` |
-| `DB_PATH` | `./data/openstocks.sqlite` | SQLite fallback when `DATABASE_URL` is empty |
 | `JWT_SECRET` | `openstocks-dev-secret` | HS256 signing key |
 | `THROTTLE_TTL_MS` | `60000` | Rate-limit window (ms) |
 | `THROTTLE_LIMIT` | `100` | Max requests per IP per window |
@@ -134,7 +133,7 @@ curl -s -X POST "$BASE/admin/resume/vSOL" -H "authorization: Bearer $TOKEN" | jq
 ## Architecture decisions
 
 - **NestJS + TypeScript** — modules/controllers/providers around Nest's DI container, running on `@nestjs/platform-express` under the hood.
-- **Supabase Postgres via `DATABASE_URL`** — when set, the API uses `pg` against your Supabase project. If unset, falls back to SQLite (`better-sqlite3`) for local/tests. `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` are optional (REST); SQL does not need them.
+- **Postgres via `DATABASE_URL`** — required; typically Supabase. Uses `pg`. `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` are optional (REST only).
 - **Append-only ledger** — `GET /portfolio/history?at=` replays ledger events; live `users`/`holdings` tables are a materialized convenience only.
 - **Matching** — Price-time-priority CLOB across users: better prices first, FIFO at a price, maker limit is the trade price, partial book consumption. Residual market size (empty book) still fills at the mark.
 - **Short selling** — Sells may open/increase a negative holding when free cash covers **50% initial margin** on the short notional; covers release collateral proportionally.
@@ -150,7 +149,6 @@ See `deps/Architecture.md`, `deps/Decisions.md`, and `deps/Thinking_Model.md` fo
 - Order book UI is not implemented (stretch goal left out on purpose).
 - Price feed is simulated (GBM ticks / explicit admin set), not real market data.
 - Margin is a simple 50% initial-collateral rule — no locate, borrow fees, margin calls, or forced liquidation schedules.
-- SQLite single-writer; horizontal scale would need Postgres + a real matching service.
 - JWT secret is a demo default — rotate via `JWT_SECRET` before any shared deploy.
 
 ## Tests

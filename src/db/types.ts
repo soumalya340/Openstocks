@@ -10,7 +10,6 @@ export interface PreparedStatement {
 }
 
 export interface Db {
-  readonly driver: "sqlite" | "postgres";
   prepare(sql: string): PreparedStatement;
   exec(sql: string): Promise<void>;
   transaction<T>(fn: () => Promise<T> | T): Promise<T>;
