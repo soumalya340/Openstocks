@@ -394,8 +394,52 @@ function pricesCross(
 }
 
 /**
+ * Cost to buy `qty` by walking resting asks (maker prices), then any residual at `mid`.
+ * Skips makers from `excludeUserId` (self-trade prevention), matching matchAgainstBook.
+ */
+export function estimateMarketBuyCost(
+  db: Db,
+  symbol: string,
+  qty: number,
+  mid: number,
+  excludeUserId?: string
+): number {
+  let remaining = roundShares(qty);
+  let cost = 0;
+  const asks = loadRestingBook(db, symbol, "sell");
+  for (const ask of asks) {
+    if (excludeUserId && ask.userId === excludeUserId) continue;
+    const avail = roundShares(ask.quantity - ask.filledQuantity);
+    if (avail <= 0) continue;
+    const take = roundShares(Math.min(remaining, avail));
+    cost = roundMoney(cost + take * (ask.limitPrice as number));
+    remaining = roundShares(remaining - take);
+    if (remaining <= 0) break;
+  }
+  if (remaining > 0) {
+    cost = roundMoney(cost + remaining * mid);
+  }
+  return cost;
+}
+
+/** Largest qty affordable at `price` given current free cash (share precision). */
+function affordableBuyQty(db: Db, userId: string, price: number, maxQty: number): number {
+  if (!(price > 0) || maxQty <= 0) return 0;
+  const free = getFreeCash(db, userId);
+  if (free + 1e-9 < price * Math.min(maxQty, 1e-8)) return 0;
+  const raw = free / price;
+  const qty = roundShares(Math.min(maxQty, raw));
+  // Guard float dust that would still overspend after roundMoney(qty * price).
+  if (roundMoney(qty * price) > free + 1e-9) {
+    return roundShares(Math.max(0, qty - 1e-8));
+  }
+  return qty;
+}
+
+/**
  * Match a taker against the resting opposite book under price-time priority.
  * Fill price is always the resting (maker) limit. Returns total qty filled on book.
+ * Buys never fill more than free cash can pay at the maker price.
  */
 function matchAgainstBook(db: Db, taker: Order, now: string): number {
   const opposite: Side = taker.side === "buy" ? "sell" : "buy";
@@ -420,9 +464,15 @@ function matchAgainstBook(db: Db, taker: Order, now: string): number {
         // Book is sorted by price priority — later makers cannot be better.
         break;
       }
-      const fillQty = roundShares(Math.min(remaining, makerRem));
-      if (fillQty <= 0) continue;
       const tradePrice = maker.limitPrice!;
+      let fillQty = roundShares(Math.min(remaining, makerRem));
+      if (taker.side === "buy") {
+        fillQty = affordableBuyQty(db, taker.userId, tradePrice, fillQty);
+      }
+      if (fillQty <= 0) {
+        if (taker.side === "buy") return filledOnBook;
+        continue;
+      }
       recordFill(db, maker, fillQty, tradePrice, now);
       recordFill(db, taker, fillQty, tradePrice, now);
       filledOnBook = roundShares(filledOnBook + fillQty);
@@ -611,7 +661,14 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     }
 
     if (type === "market" && side === "buy") {
-      const cost = roundMoney(quantity * asset.price);
+      // Walk the ask book at maker prices, then residual at mid — not mark * qty.
+      const cost = estimateMarketBuyCost(
+        db,
+        symbol,
+        quantity,
+        asset.price,
+        userId
+      );
       if (getFreeCash(db, userId) + 1e-9 < cost) {
         return { ok: false, error: "Insufficient cash for market buy", statusCode: 400 };
       }
@@ -702,10 +759,15 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     const afterBook = getOrder(db, order.id)!;
     Object.assign(order, afterBook);
 
-    const remaining = roundShares(order.quantity - order.filledQuantity);
+    let remaining = roundShares(order.quantity - order.filledQuantity);
     if (remaining > 0 && type === "market") {
-      // Residual market quantity lifts/hits synthetic mid liquidity (single-asset mark).
-      recordFill(db, order, remaining, asset.price, now);
+      if (side === "buy") {
+        remaining = affordableBuyQty(db, userId, asset.price, remaining);
+      }
+      if (remaining > 0) {
+        // Residual market quantity lifts/hits synthetic mid liquidity (single-asset mark).
+        recordFill(db, order, remaining, asset.price, now);
+      }
     }
 
     const fresh = getOrder(db, order.id)!;

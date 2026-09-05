@@ -3,7 +3,12 @@ import request from "supertest";
 import { createTestApp, login, auth } from "./helpers.js";
 import type { Db } from "../src/db.js";
 import type { INestApplication } from "@nestjs/common";
-import { placeOrder, getOrder } from "../src/trading/index.js";
+import {
+  placeOrder,
+  getOrder,
+  estimateMarketBuyCost,
+} from "../src/trading/index.js";
+import { getPortfolio } from "../src/portfolio/index.js";
 
 describe("price-time-priority matching", () => {
   let db: Db;
@@ -179,4 +184,83 @@ describe("price-time-priority matching", () => {
     expect(bOrder.status).toBe("partially_filled");
     expect(bOrder.filledQuantity).toBe(3);
   });
+
+  it("rejects market buy when walked ask book costs more than free cash (no negative cash)", async () => {
+    const ctx = await createTestApp();
+    db = ctx.db;
+    nestApp = ctx.nestApp;
+    const m1 = await login(ctx.app, "ask-hi-1");
+    const m2 = await login(ctx.app, "ask-hi-2");
+    const buyer = await login(ctx.app, "thin-buyer");
+
+    // Elevated asks above vATL mid (95.5)
+    expect(
+      placeOrder(db, {
+        userId: m1.userId,
+        symbol: "vATL",
+        side: "sell",
+        type: "limit",
+        quantity: 3,
+        limitPrice: 120,
+        idempotencyKey: "ask-120",
+        now: "2026-03-04T10:00:00.000Z",
+      }).ok
+    ).toBe(true);
+    expect(
+      placeOrder(db, {
+        userId: m2.userId,
+        symbol: "vATL",
+        side: "sell",
+        type: "limit",
+        quantity: 5,
+        limitPrice: 130,
+        idempotencyKey: "ask-130",
+        now: "2026-03-04T10:00:01.000Z",
+      }).ok
+    ).toBe(true);
+
+    // Exactly 10 * mid — enough for a naive mark*qty check, not for the walked book.
+    const mid = 95.5;
+    const cash = roundMoney(10 * mid); // 955
+    db.prepare(`UPDATE users SET cash = ? WHERE id = ?`).run(cash, buyer.userId);
+
+    const walked = estimateMarketBuyCost(db, "vATL", 10, mid, buyer.userId);
+    // 3*120 + 5*130 + 2*95.5 = 360 + 650 + 191 = 1201
+    expect(walked).toBe(1201);
+    expect(walked).toBeGreaterThan(cash);
+
+    const rejected = placeOrder(db, {
+      userId: buyer.userId,
+      symbol: "vATL",
+      side: "buy",
+      type: "market",
+      quantity: 10,
+      idempotencyKey: "mkt-overask",
+      now: "2026-03-04T10:00:02.000Z",
+    });
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) {
+      expect(rejected.error).toMatch(/Insufficient cash/i);
+      expect(rejected.statusCode).toBe(400);
+    }
+
+    const port = getPortfolio(db, buyer.userId);
+    expect(port.cash).toBe(cash);
+    expect(port.cash).toBeGreaterThanOrEqual(0);
+    expect(port.holdings.find((h) => h.symbol === "vATL")).toBeUndefined();
+
+    // HTTP path agrees
+    const http = await request(ctx.app)
+      .post("/orders")
+      .set(auth(buyer.token))
+      .set("Idempotency-Key", "mkt-overask-http")
+      .send({ symbol: "vATL", side: "buy", type: "market", quantity: 10 })
+      .expect(400);
+    expect(http.body.error).toMatch(/Insufficient cash/i);
+    expect(getPortfolio(db, buyer.userId).cash).toBe(cash);
+  });
 });
+
+function roundMoney(n: number): number {
+  return Math.round(n * 100) / 100;
+}
