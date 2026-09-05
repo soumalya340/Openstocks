@@ -1,19 +1,15 @@
-import path from "node:path";
+import { env } from "./env.js";
 import { openDatabase } from "./db.js";
 import { createApp } from "./app.js";
 
-const PORT = Number(process.env.PORT ?? 3000);
-const DB_PATH =
-  process.env.DB_PATH ?? path.join(process.cwd(), "data", "openstocks.sqlite");
-
-const db = openDatabase(DB_PATH);
+const db = openDatabase(env.DB_PATH);
 const app = createApp(db);
 
-const server = app.listen(PORT, () => {
+const server = app.listen(env.PORT, () => {
   // eslint-disable-next-line no-console
-  console.log(`OpenStocks API listening on http://localhost:${PORT}`);
+  console.log(`OpenStocks API listening on http://localhost:${env.PORT}`);
   // eslint-disable-next-line no-console
-  console.log(`SQLite database: ${DB_PATH}`);
+  console.log(`SQLite database: ${env.DB_PATH}`);
 });
 
 function shutdown(): void {

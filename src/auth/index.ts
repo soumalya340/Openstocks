@@ -3,8 +3,9 @@ import jwt from "jsonwebtoken";
 import { v4 as uuid } from "uuid";
 import type { Db } from "../db.js";
 import { appendLedger } from "../ledger/index.js";
+import { env } from "../env.js";
 
-export const JWT_SECRET = process.env.JWT_SECRET ?? "openstocks-dev-secret";
+export const JWT_SECRET = env.JWT_SECRET;
 export const INITIAL_CASH = 100_000;
 
 export interface AuthUser {

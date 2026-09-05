@@ -13,6 +13,7 @@ This file records packages, files, and topic-level choices for the OpenStocks ta
 | `jsonwebtoken` | Lightweight JWT auth as allowed by the assignment (no OAuth/SSO). |
 | `uuid` | Order IDs and ledger event IDs. |
 | `cors` | Local browser/tooling access during manual checks. |
+| `dotenv` | Load `PORT`, `DB_PATH`, `JWT_SECRET` from `.env` at process start (`src/env.ts`). |
 
 ## 2. Files / layout
 

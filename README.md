@@ -15,19 +15,20 @@ Take-home implementation of a simplified platform where users trade tokenized sh
 
 ```bash
 yarn install
-yarn test          # Vitest suite
-yarn start         # API on http://localhost:3000
+cp .env.example .env   # edit secrets/paths as needed
+yarn test              # Vitest suite
+yarn start             # API on http://localhost:$PORT
 ```
 
-Optional env:
+Environment variables are loaded from `.env` via `dotenv` (`src/env.ts`):
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `PORT` | `3000` | HTTP port |
-| `DB_PATH` | `data/openstocks.sqlite` | SQLite file (`:memory:` supported) |
+| `DB_PATH` | `./data/openstocks.sqlite` | SQLite file (`:memory:` supported) |
 | `JWT_SECRET` | `openstocks-dev-secret` | HS256 signing key |
 
-Requires Node 20+.
+`.env` is gitignored; commit `.env.example` as the template. Requires Node 20+.
 
 ## Quick start
 
