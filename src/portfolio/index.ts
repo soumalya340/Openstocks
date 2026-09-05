@@ -204,35 +204,35 @@ function getFallbackPrice(symbol: string): number {
 }
 
 /** Live portfolio from current tables (fast path). */
-export function getPortfolio(db: Db, userId: string): PortfolioSnapshot {
-  const user = db
+export async function getPortfolio(db: Db, userId: string): Promise<PortfolioSnapshot> {
+  const user = (await db
     .prepare(`SELECT cash FROM users WHERE id = ?`)
-    .get(userId) as { cash: number } | undefined;
+    .get(userId)) as { cash: number } | undefined;
   if (!user) {
     throw new Error("User not found");
   }
 
   const orderReserved = (
-    db
+    (await db
       .prepare(
         `SELECT COALESCE(SUM(reserved_cash), 0) AS s FROM orders
          WHERE user_id = ? AND status IN ('open', 'partially_filled')`
       )
-      .get(userId) as { s: number }
+      .get(userId)) as { s: number }
   ).s;
 
-  const rows = db
+  const rows = (await db
     .prepare(
       `SELECT symbol, quantity, cost_basis, margin_reserved FROM holdings WHERE user_id = ?`
     )
-    .all(userId) as Array<{
+    .all(userId)) as Array<{
     symbol: string;
     quantity: number;
     cost_basis: number;
     margin_reserved: number;
   }>;
 
-  const assets = listAssets(db);
+  const assets = await listAssets(db);
   const priceMap = new Map(assets.map((a) => [a.symbol, a.price]));
 
   const holdings: Holding[] = [];
@@ -278,27 +278,27 @@ export function getPortfolio(db: Db, userId: string): PortfolioSnapshot {
  * Reconstruct portfolio at a past timestamp by replaying the append-only ledger.
  * This is the assignment's heavily weighted path — not a cached snapshot lookup.
  */
-export function getPortfolioAt(
+export async function getPortfolioAt(
   db: Db,
   userId: string,
   atIso: string
-): PortfolioSnapshot {
+): Promise<PortfolioSnapshot> {
   if (Number.isNaN(Date.parse(atIso))) {
     throw new Error("Invalid timestamp");
   }
 
   const seedPrices = new Map<string, number>();
-  for (const a of listAssets(db)) {
-    const hist = db
+  for (const a of await listAssets(db)) {
+    const hist = (await db
       .prepare(
         `SELECT price FROM price_history WHERE symbol = ? AND ts <= ? ORDER BY ts DESC LIMIT 1`
       )
-      .get(a.symbol, atIso) as { price: number } | undefined;
+      .get(a.symbol, atIso)) as { price: number } | undefined;
     seedPrices.set(a.symbol, hist?.price ?? a.price);
   }
 
   const state = emptyState(seedPrices);
-  const events = listLedgerUpTo(db, atIso, userId);
+  const events = await listLedgerUpTo(db, atIso, userId);
   for (const event of events) {
     applyEvent(state, event, userId);
   }
@@ -319,6 +319,6 @@ export function getPortfolioAt(
   return snapshotFromState(userId, state, atIso);
 }
 
-export function getCurrentPrice(db: Db, symbol: string): number {
-  return getAsset(db, symbol)?.price ?? 0;
+export async function getCurrentPrice(db: Db, symbol: string): Promise<number> {
+  return (await getAsset(db, symbol))?.price ?? 0;
 }

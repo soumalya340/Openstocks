@@ -63,8 +63,8 @@ describe("admin halt / resume", () => {
 
     const t0 = new Date(Date.now() - 20_000).toISOString();
     const t1 = new Date(Date.now() - 5_000).toISOString();
-    setPrice(db, "vVAN", 310.1, t0);
-    setPrice(db, "vVAN", 360, t1);
+    await setPrice(db, "vVAN", 310.1, t0);
+    await setPrice(db, "vVAN", 360, t1);
 
     const rejected = await request(ctx.app)
       .post("/orders")

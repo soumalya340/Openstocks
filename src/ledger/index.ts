@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import type { Db } from "../db.js";
 import type { LedgerEvent, LedgerEventType } from "../types.js";
 
-export function appendLedger(
+export async function appendLedger(
   db: Db,
   input: {
     type: LedgerEventType;
@@ -11,7 +11,7 @@ export function appendLedger(
     payload: Record<string, unknown>;
     ts?: string;
   }
-): LedgerEvent {
+): Promise<LedgerEvent> {
   const event: LedgerEvent = {
     id: uuid(),
     type: input.type,
@@ -20,28 +20,34 @@ export function appendLedger(
     payload: input.payload,
     ts: input.ts ?? new Date().toISOString(),
   };
-  db.prepare(
-    `INSERT INTO ledger (id, type, user_id, symbol, payload, ts) VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(
-    event.id,
-    event.type,
-    event.userId,
-    event.symbol,
-    JSON.stringify(event.payload),
-    event.ts
-  );
+  await db
+    .prepare(
+      `INSERT INTO ledger (id, type, user_id, symbol, payload, ts) VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      event.id,
+      event.type,
+      event.userId,
+      event.symbol,
+      JSON.stringify(event.payload),
+      event.ts
+    );
   return event;
 }
 
-export function listLedgerUpTo(db: Db, atIso: string, userId?: string): LedgerEvent[] {
+export async function listLedgerUpTo(
+  db: Db,
+  atIso: string,
+  userId?: string
+): Promise<LedgerEvent[]> {
   const rows = userId
-    ? (db
+    ? ((await db
         .prepare(
           `SELECT id, type, user_id, symbol, payload, ts FROM ledger
            WHERE ts <= ? AND (user_id IS NULL OR user_id = ?)
            ORDER BY ts ASC, id ASC`
         )
-        .all(atIso, userId) as Array<{
+        .all(atIso, userId)) as Array<{
         id: string;
         type: LedgerEventType;
         user_id: string | null;
@@ -49,13 +55,13 @@ export function listLedgerUpTo(db: Db, atIso: string, userId?: string): LedgerEv
         payload: string;
         ts: string;
       }>)
-    : (db
+    : ((await db
         .prepare(
           `SELECT id, type, user_id, symbol, payload, ts FROM ledger
            WHERE ts <= ?
            ORDER BY ts ASC, id ASC`
         )
-        .all(atIso) as Array<{
+        .all(atIso)) as Array<{
         id: string;
         type: LedgerEventType;
         user_id: string | null;

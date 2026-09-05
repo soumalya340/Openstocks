@@ -21,6 +21,7 @@ export async function createTestApp(
     imports: [
       AppModule.forRoot({
         dbPath: ":memory:",
+        databaseUrl: null, // force SQLite in tests even if .env has DATABASE_URL
         throttleLimit: 10_000,
         throttleTtlMs: 60_000,
         ...options,

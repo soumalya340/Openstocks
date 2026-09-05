@@ -62,10 +62,10 @@ export function gbmNextPrice(
   return Math.max(0.01, Number(next.toFixed(4)));
 }
 
-export function listAssets(db: Db): Asset[] {
-  const rows = db
+export async function listAssets(db: Db): Promise<Asset[]> {
+  const rows = (await db
     .prepare(`SELECT symbol, name, price, updated_at FROM assets ORDER BY symbol`)
-    .all() as Array<{
+    .all()) as Array<{
     symbol: string;
     name: string;
     price: number;
@@ -79,10 +79,10 @@ export function listAssets(db: Db): Asset[] {
   }));
 }
 
-export function getAsset(db: Db, symbol: string): Asset | null {
-  const r = db
+export async function getAsset(db: Db, symbol: string): Promise<Asset | null> {
+  const r = (await db
     .prepare(`SELECT symbol, name, price, updated_at FROM assets WHERE symbol = ?`)
-    .get(symbol) as
+    .get(symbol)) as
     | { symbol: string; name: string; price: number; updated_at: string }
     | undefined;
   if (!r) return null;
@@ -94,24 +94,24 @@ export function getAsset(db: Db, symbol: string): Asset | null {
   };
 }
 
-export function getPriceHistory(db: Db, symbol: string): PricePoint[] {
-  const rows = db
+export async function getPriceHistory(db: Db, symbol: string): Promise<PricePoint[]> {
+  const rows = (await db
     .prepare(
       `SELECT symbol, price, ts FROM price_history WHERE symbol = ? ORDER BY ts ASC`
     )
-    .all(symbol) as Array<{ symbol: string; price: number; ts: string }>;
+    .all(symbol)) as Array<{ symbol: string; price: number; ts: string }>;
   return rows.map((r) => ({ symbol: r.symbol, price: r.price, ts: r.ts }));
 }
 
-export function calculateShares(
+export async function calculateShares(
   db: Db,
   symbol: string,
   usdAmount: number
-): CalculatorResult | { error: string } {
+): Promise<CalculatorResult | { error: string }> {
   if (!(usdAmount > 0) || !Number.isFinite(usdAmount)) {
     return { error: "usdAmount must be a positive number" };
   }
-  const asset = getAsset(db, symbol);
+  const asset = await getAsset(db, symbol);
   if (!asset) return { error: `Unknown symbol: ${symbol}` };
   const shares = usdAmount / asset.price;
   return {
@@ -123,38 +123,34 @@ export function calculateShares(
 }
 
 /** Set price explicitly (tests / circuit breaker scenarios). */
-export function setPrice(
+export async function setPrice(
   db: Db,
   symbol: string,
   price: number,
   ts: string = new Date().toISOString()
-): Asset {
+): Promise<Asset> {
   if (!(price > 0) || !Number.isFinite(price)) {
     throw new Error("price must be positive");
   }
-  const asset = getAsset(db, symbol);
+  const asset = await getAsset(db, symbol);
   if (!asset) throw new Error(`Unknown symbol: ${symbol}`);
 
   const previous = asset.price;
-  db.prepare(`UPDATE assets SET price = ?, updated_at = ? WHERE symbol = ?`).run(
-    price,
-    ts,
-    symbol
-  );
-  db.prepare(`INSERT INTO price_history (symbol, price, ts) VALUES (?, ?, ?)`).run(
-    symbol,
-    price,
-    ts
-  );
-  appendLedger(db, {
+  await db
+    .prepare(`UPDATE assets SET price = ?, updated_at = ? WHERE symbol = ?`)
+    .run(price, ts, symbol);
+  await db
+    .prepare(`INSERT INTO price_history (symbol, price, ts) VALUES (?, ?, ?)`)
+    .run(symbol, price, ts);
+  await appendLedger(db, {
     type: "PRICE_TICK",
     symbol,
     payload: { price, previous },
     ts,
   });
 
-  maybeTripCircuitBreaker(db, symbol, ts);
-  const updated = getAsset(db, symbol)!;
+  await maybeTripCircuitBreaker(db, symbol, ts);
+  const updated = (await getAsset(db, symbol))!;
   notifyPriceUpdate(updated);
   return updated;
 }
@@ -163,27 +159,31 @@ export function setPrice(
  * Advance simulated prices with one geometric Brownian motion step per asset.
  * Pass `sample` to inject deterministic normals in tests.
  */
-export function tickPrices(
+export async function tickPrices(
   db: Db,
   now: string = new Date().toISOString(),
   sample: NormalSampler = sampleNormal
-): Asset[] {
-  const assets = listAssets(db);
+): Promise<Asset[]> {
+  const assets = await listAssets(db);
   for (const a of assets) {
     const next = gbmNextPrice(a.price, sample());
-    setPrice(db, a.symbol, next, now);
+    await setPrice(db, a.symbol, next, now);
   }
   return listAssets(db);
 }
 
-function maybeTripCircuitBreaker(db: Db, symbol: string, nowIso: string): void {
+async function maybeTripCircuitBreaker(
+  db: Db,
+  symbol: string,
+  nowIso: string
+): Promise<void> {
   const now = Date.parse(nowIso);
   const since = new Date(now - CIRCUIT_LOOKBACK_MS).toISOString();
-  const rows = db
+  const rows = (await db
     .prepare(
       `SELECT price, ts FROM price_history WHERE symbol = ? AND ts >= ? ORDER BY ts ASC`
     )
-    .all(symbol, since) as Array<{ price: number; ts: string }>;
+    .all(symbol, since)) as Array<{ price: number; ts: string }>;
   if (rows.length < 2) return;
 
   const min = Math.min(...rows.map((r) => r.price));
@@ -192,22 +192,24 @@ function maybeTripCircuitBreaker(db: Db, symbol: string, nowIso: string): void {
   const move = (max - min) / base;
   if (move > CIRCUIT_MOVE_PCT) {
     const until = new Date(now + CIRCUIT_HALT_MS).toISOString();
-    db.prepare(
-      `INSERT INTO circuit_breakers (symbol, tripped_at, until_ts)
+    await db
+      .prepare(
+        `INSERT INTO circuit_breakers (symbol, tripped_at, until_ts)
        VALUES (?, ?, ?)
        ON CONFLICT(symbol) DO UPDATE SET tripped_at = excluded.tripped_at, until_ts = excluded.until_ts`
-    ).run(symbol, nowIso, until);
+      )
+      .run(symbol, nowIso, until);
   }
 }
 
-export function isCircuitOpen(
+export async function isCircuitOpen(
   db: Db,
   symbol: string,
   nowIso: string = new Date().toISOString()
-): { open: boolean; until?: string } {
-  const row = db
+): Promise<{ open: boolean; until?: string }> {
+  const row = (await db
     .prepare(`SELECT until_ts FROM circuit_breakers WHERE symbol = ?`)
-    .get(symbol) as { until_ts: string } | undefined;
+    .get(symbol)) as { until_ts: string } | undefined;
   if (!row) return { open: false };
   if (Date.parse(row.until_ts) > Date.parse(nowIso)) {
     return { open: true, until: row.until_ts };
@@ -216,20 +218,22 @@ export function isCircuitOpen(
 }
 
 /** Manual admin halt — independent of the automatic circuit breaker. */
-export function haltTrading(
+export async function haltTrading(
   db: Db,
   symbol: string,
   nowIso: string = new Date().toISOString(),
   haltedBy: string | null = null
-): void {
-  const asset = getAsset(db, symbol);
+): Promise<void> {
+  const asset = await getAsset(db, symbol);
   if (!asset) throw new Error(`Unknown symbol: ${symbol}`);
-  db.prepare(
-    `INSERT INTO trading_halts (symbol, halted_at, halted_by)
+  await db
+    .prepare(
+      `INSERT INTO trading_halts (symbol, halted_at, halted_by)
      VALUES (?, ?, ?)
      ON CONFLICT(symbol) DO UPDATE SET halted_at = excluded.halted_at, halted_by = excluded.halted_by`
-  ).run(symbol, nowIso, haltedBy);
-  appendLedger(db, {
+    )
+    .run(symbol, nowIso, haltedBy);
+  await appendLedger(db, {
     type: "TRADING_HALTED",
     symbol,
     payload: { haltedBy },
@@ -237,15 +241,15 @@ export function haltTrading(
   });
 }
 
-export function resumeTrading(
+export async function resumeTrading(
   db: Db,
   symbol: string,
   nowIso: string = new Date().toISOString()
-): void {
-  const asset = getAsset(db, symbol);
+): Promise<void> {
+  const asset = await getAsset(db, symbol);
   if (!asset) throw new Error(`Unknown symbol: ${symbol}`);
-  db.prepare(`DELETE FROM trading_halts WHERE symbol = ?`).run(symbol);
-  appendLedger(db, {
+  await db.prepare(`DELETE FROM trading_halts WHERE symbol = ?`).run(symbol);
+  await appendLedger(db, {
     type: "TRADING_RESUMED",
     symbol,
     payload: {},
@@ -253,10 +257,10 @@ export function resumeTrading(
   });
 }
 
-export function isTradingHalted(db: Db, symbol: string): boolean {
-  const row = db
+export async function isTradingHalted(db: Db, symbol: string): Promise<boolean> {
+  const row = (await db
     .prepare(`SELECT symbol FROM trading_halts WHERE symbol = ?`)
-    .get(symbol) as { symbol: string } | undefined;
+    .get(symbol)) as { symbol: string } | undefined;
   return Boolean(row);
 }
 

@@ -7,12 +7,12 @@ export class AuthController {
 
   @Post("token")
   @HttpCode(201)
-  issueToken(@Body() body: { username?: unknown }) {
+  async issueToken(@Body() body: { username?: unknown }) {
     const username = String(body?.username ?? "").trim();
     if (!username) {
       throw new BadRequestException("username is required");
     }
-    const user = this.authService.ensureUser(username);
+    const user = await this.authService.ensureUser(username);
     const token = this.authService.issueToken(user);
     return {
       token,

@@ -9,7 +9,7 @@ export class DatabaseService implements OnApplicationShutdown {
     return this.db;
   }
 
-  onApplicationShutdown(): void {
-    this.db.close();
+  async onApplicationShutdown(): Promise<void> {
+    await this.db.close();
   }
 }

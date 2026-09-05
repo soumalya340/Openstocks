@@ -27,16 +27,16 @@ export class AdminController {
 
   @Post("prices/:symbol")
   @HttpCode(200)
-  setPrice(
+  async setPrice(
     @Param("symbol") symbol: string,
     @Body() body: { price?: unknown; ts?: unknown; fillFraction?: unknown }
   ) {
     try {
       const price = Number(body?.price);
       const now = body?.ts ? String(body.ts) : new Date().toISOString();
-      const asset = setPrice(this.db, String(symbol), price, now);
+      const asset = await setPrice(this.db, String(symbol), price, now);
       // Match resting book under price-time priority (fillFraction ignored).
-      const filled = matchOpenLimits(this.db, String(symbol), price, now);
+      const filled = await matchOpenLimits(this.db, String(symbol), price, now);
       return { asset, matchedOrders: filled };
     } catch (e) {
       throw new BadRequestException((e as Error).message);
@@ -45,14 +45,14 @@ export class AdminController {
 
   @Post("halt/:symbol")
   @HttpCode(200)
-  halt(
+  async halt(
     @Param("symbol") symbol: string,
     @CurrentUser() user: AuthUser,
     @Body() body: { ts?: unknown }
   ) {
     try {
       const now = body?.ts ? String(body.ts) : new Date().toISOString();
-      haltTrading(this.db, String(symbol), now, user.userId);
+      await haltTrading(this.db, String(symbol), now, user.userId);
       return { symbol: String(symbol), halted: true, at: now };
     } catch (e) {
       throw new BadRequestException((e as Error).message);
@@ -61,13 +61,13 @@ export class AdminController {
 
   @Post("resume/:symbol")
   @HttpCode(200)
-  resume(
+  async resume(
     @Param("symbol") symbol: string,
     @Body() body: { ts?: unknown }
   ) {
     try {
       const now = body?.ts ? String(body.ts) : new Date().toISOString();
-      resumeTrading(this.db, String(symbol), now);
+      await resumeTrading(this.db, String(symbol), now);
       return { symbol: String(symbol), halted: false, at: now };
     } catch (e) {
       throw new BadRequestException((e as Error).message);

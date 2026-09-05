@@ -48,10 +48,13 @@ Environment variables are loaded from `.env` via `dotenv` (`src/env.ts`):
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `PORT` | `3000` | HTTP port |
-| `DB_PATH` | `./data/openstocks.sqlite` | SQLite file (`:memory:` supported) |
+| `DATABASE_URL` | _(empty)_ | **Supabase/Postgres connection string** — when set, the API uses Postgres (not SQLite). Encode `@` in passwords as `%40`. |
+| `SUPABASE_URL` | _(empty)_ | Optional; REST client URL (SQL uses `DATABASE_URL`, not this) |
+| `SUPABASE_SERVICE_ROLE_KEY` | _(empty)_ | Optional; not required for direct SQL via `pg` |
+| `DB_PATH` | `./data/openstocks.sqlite` | SQLite fallback when `DATABASE_URL` is empty |
 | `JWT_SECRET` | `openstocks-dev-secret` | HS256 signing key |
 | `THROTTLE_TTL_MS` | `60000` | Rate-limit window (ms) |
-| `THROTTLE_LIMIT` | `1` | Max requests per IP per window (**1 rpm**) |
+| `THROTTLE_LIMIT` | `100` | Max requests per IP per window |
 
 `.env` is gitignored; commit `.env.example` as the template. Requires Node 20+.
 
@@ -131,7 +134,7 @@ curl -s -X POST "$BASE/admin/resume/vSOL" -H "authorization: Bearer $TOKEN" | jq
 ## Architecture decisions
 
 - **NestJS + TypeScript** — modules/controllers/providers around Nest's DI container, running on `@nestjs/platform-express` under the hood.
-- **SQLite (`better-sqlite3`)** — Assignment prefers PostgreSQL; `psql` is unavailable here. SQLite keeps relational ledger semantics and zero-ops local runs. Schema is Postgres-portable.
+- **Supabase Postgres via `DATABASE_URL`** — when set, the API uses `pg` against your Supabase project. If unset, falls back to SQLite (`better-sqlite3`) for local/tests. `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` are optional (REST); SQL does not need them.
 - **Append-only ledger** — `GET /portfolio/history?at=` replays ledger events; live `users`/`holdings` tables are a materialized convenience only.
 - **Matching** — Price-time-priority CLOB across users: better prices first, FIFO at a price, maker limit is the trade price, partial book consumption. Residual market size (empty book) still fills at the mark.
 - **Short selling** — Sells may open/increase a negative holding when free cash covers **50% initial margin** on the short notional; covers release collateral proportionally.

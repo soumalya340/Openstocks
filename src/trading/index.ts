@@ -55,91 +55,107 @@ function rowToOrder(r: {
   };
 }
 
-export function getOrder(db: Db, orderId: string): Order | null {
-  const r = db.prepare(`SELECT * FROM orders WHERE id = ?`).get(orderId) as
+export async function getOrder(db: Db, orderId: string): Promise<Order | null> {
+  const r = (await db.prepare(`SELECT * FROM orders WHERE id = ?`).get(orderId)) as
     | Parameters<typeof rowToOrder>[0]
     | undefined;
   return r ? rowToOrder(r) : null;
 }
 
-export function getIdempotentResponse(
+export async function getIdempotentResponse(
   db: Db,
   userId: string,
   key: string
-): { statusCode: number; body: unknown } | null {
-  const row = db
+): Promise<{ statusCode: number; body: unknown } | null> {
+  const row = (await db
     .prepare(
       `SELECT status_code, body FROM idempotency WHERE user_id = ? AND key = ?`
     )
-    .get(userId, key) as { status_code: number; body: string } | undefined;
+    .get(userId, key)) as { status_code: number; body: string } | undefined;
   if (!row) return null;
   return { statusCode: row.status_code, body: JSON.parse(row.body) };
 }
 
-export function saveIdempotentResponse(
+export async function saveIdempotentResponse(
   db: Db,
   userId: string,
   key: string,
   statusCode: number,
   body: unknown
-): void {
-  db.prepare(
-    `INSERT OR REPLACE INTO idempotency (user_id, key, status_code, body, created_at)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(userId, key, statusCode, JSON.stringify(body), new Date().toISOString());
+): Promise<void> {
+  const createdAt = new Date().toISOString();
+  const json = JSON.stringify(body);
+  if (db.driver === "postgres") {
+    await db
+      .prepare(
+        `INSERT INTO idempotency (user_id, key, status_code, body, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (user_id, key) DO UPDATE SET status_code = EXCLUDED.status_code, body = EXCLUDED.body, created_at = EXCLUDED.created_at`
+      )
+      .run(userId, key, statusCode, json, createdAt);
+  } else {
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO idempotency (user_id, key, status_code, body, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(userId, key, statusCode, json, createdAt);
+  }
 }
 
-function getUserCash(db: Db, userId: string): number {
-  const row = db.prepare(`SELECT cash FROM users WHERE id = ?`).get(userId) as
+async function getUserCash(db: Db, userId: string): Promise<number> {
+  const row = (await db.prepare(`SELECT cash FROM users WHERE id = ?`).get(userId)) as
     | { cash: number }
     | undefined;
   if (!row) throw new Error("User not found");
   return row.cash;
 }
 
-function getHoldingRow(
+async function getHoldingRow(
   db: Db,
   userId: string,
   symbol: string
-): { quantity: number; cost_basis: number; margin_reserved: number } | undefined {
-  return db
+): Promise<{ quantity: number; cost_basis: number; margin_reserved: number } | undefined> {
+  return (await db
     .prepare(
       `SELECT quantity, cost_basis, margin_reserved FROM holdings WHERE user_id = ? AND symbol = ?`
     )
-    .get(userId, symbol) as
+    .get(userId, symbol)) as
     | { quantity: number; cost_basis: number; margin_reserved: number }
     | undefined;
 }
 
-function getHoldingQty(db: Db, userId: string, symbol: string): number {
-  return getHoldingRow(db, userId, symbol)?.quantity ?? 0;
+async function getHoldingQty(db: Db, userId: string, symbol: string): Promise<number> {
+  return (await getHoldingRow(db, userId, symbol))?.quantity ?? 0;
 }
 
-function sumOrderReservedCash(db: Db, userId: string): number {
+async function sumOrderReservedCash(db: Db, userId: string): Promise<number> {
   return (
-    db
+    (await db
       .prepare(
         `SELECT COALESCE(SUM(reserved_cash), 0) AS s FROM orders
          WHERE user_id = ? AND status IN ('open', 'partially_filled')`
       )
-      .get(userId) as { s: number }
+      .get(userId)) as { s: number }
   ).s;
 }
 
-function sumHoldingsMargin(db: Db, userId: string): number {
+async function sumHoldingsMargin(db: Db, userId: string): Promise<number> {
   return (
-    db
+    (await db
       .prepare(
         `SELECT COALESCE(SUM(margin_reserved), 0) AS s FROM holdings WHERE user_id = ?`
       )
-      .get(userId) as { s: number }
+      .get(userId)) as { s: number }
   ).s;
 }
 
 /** Cash available after limit-buy reservations and posted short margin. */
-export function getFreeCash(db: Db, userId: string): number {
+export async function getFreeCash(db: Db, userId: string): Promise<number> {
   return roundMoney(
-    getUserCash(db, userId) - sumOrderReservedCash(db, userId) - sumHoldingsMargin(db, userId)
+    (await getUserCash(db, userId)) -
+      (await sumOrderReservedCash(db, userId)) -
+      (await sumHoldingsMargin(db, userId))
   );
 }
 
@@ -148,25 +164,29 @@ export function requiredMargin(shortQty: number, price: number): number {
   return roundMoney(shortQty * price * MARGIN.INITIAL_PCT);
 }
 
-function upsertHolding(
+async function upsertHolding(
   db: Db,
   userId: string,
   symbol: string,
   quantity: number,
   costBasis: number,
   marginReserved: number
-): void {
-  const existing = getHoldingRow(db, userId, symbol);
+): Promise<void> {
+  const existing = await getHoldingRow(db, userId, symbol);
   if (existing) {
-    db.prepare(
-      `UPDATE holdings SET quantity = ?, cost_basis = ?, margin_reserved = ?
+    await db
+      .prepare(
+        `UPDATE holdings SET quantity = ?, cost_basis = ?, margin_reserved = ?
        WHERE user_id = ? AND symbol = ?`
-    ).run(quantity, costBasis, marginReserved, userId, symbol);
+      )
+      .run(quantity, costBasis, marginReserved, userId, symbol);
   } else {
-    db.prepare(
-      `INSERT INTO holdings (user_id, symbol, quantity, cost_basis, margin_reserved)
+    await db
+      .prepare(
+        `INSERT INTO holdings (user_id, symbol, quantity, cost_basis, margin_reserved)
        VALUES (?, ?, ?, ?, ?)`
-    ).run(userId, symbol, quantity, costBasis, marginReserved);
+      )
+      .run(userId, symbol, quantity, costBasis, marginReserved);
   }
 }
 
@@ -174,15 +194,15 @@ function upsertHolding(
  * Apply a fill to holdings/cash. Supports long, short, and cover paths.
  * Returns the change in posted short margin (positive = more collateral reserved).
  */
-function applyFillToHolding(
+async function applyFillToHolding(
   db: Db,
   userId: string,
   symbol: string,
   side: Side,
   qty: number,
   price: number
-): { marginDelta: number } {
-  const existing = getHoldingRow(db, userId, symbol);
+): Promise<{ marginDelta: number }> {
+  const existing = await getHoldingRow(db, userId, symbol);
   const have = existing?.quantity ?? 0;
   const cost = existing?.cost_basis ?? 0;
   const margin = existing?.margin_reserved ?? 0;
@@ -192,7 +212,7 @@ function applyFillToHolding(
     if (have >= 0) {
       const newQty = roundShares(have + qty);
       const newCost = roundMoney(cost + qty * price);
-      upsertHolding(db, userId, symbol, newQty, newCost, margin);
+      await upsertHolding(db, userId, symbol, newQty, newCost, margin);
     } else {
       const shortQty = -have;
       if (qty + 1e-12 < shortQty) {
@@ -201,7 +221,7 @@ function applyFillToHolding(
         const newCost = roundMoney(avg * newQty);
         const release = roundMoney(margin * (qty / shortQty));
         marginDelta = -release;
-        upsertHolding(
+        await upsertHolding(
           db,
           userId,
           symbol,
@@ -211,28 +231,27 @@ function applyFillToHolding(
         );
       } else if (Math.abs(qty - shortQty) <= 1e-12) {
         marginDelta = -margin;
-        upsertHolding(db, userId, symbol, 0, 0, 0);
+        await upsertHolding(db, userId, symbol, 0, 0, 0);
       } else {
         const longQty = roundShares(qty - shortQty);
         marginDelta = -margin;
-        upsertHolding(db, userId, symbol, longQty, roundMoney(longQty * price), 0);
+        await upsertHolding(db, userId, symbol, longQty, roundMoney(longQty * price), 0);
       }
     }
-    db.prepare(`UPDATE users SET cash = cash - ? WHERE id = ?`).run(
-      roundMoney(qty * price),
-      userId
-    );
+    await db
+      .prepare(`UPDATE users SET cash = cash - ? WHERE id = ?`)
+      .run(roundMoney(qty * price), userId);
   } else {
     if (have + 1e-12 >= qty) {
       const avg = have > 0 ? cost / have : price;
       const newQty = roundShares(have - qty);
       const newCost = roundMoney(avg * newQty);
-      upsertHolding(db, userId, symbol, newQty, newCost, margin);
+      await upsertHolding(db, userId, symbol, newQty, newCost, margin);
     } else if (have > 0) {
       const shortOpened = roundShares(qty - have);
       const addMargin = requiredMargin(shortOpened, price);
       marginDelta = addMargin;
-      upsertHolding(
+      await upsertHolding(
         db,
         userId,
         symbol,
@@ -246,7 +265,7 @@ function applyFillToHolding(
       marginDelta = addMargin;
       const newQty = roundShares(have - qty);
       const newCost = roundMoney(cost - qty * price);
-      upsertHolding(
+      await upsertHolding(
         db,
         userId,
         symbol,
@@ -255,29 +274,30 @@ function applyFillToHolding(
         roundMoney(margin + addMargin)
       );
     }
-    db.prepare(`UPDATE users SET cash = cash + ? WHERE id = ?`).run(
-      roundMoney(qty * price),
-      userId
-    );
+    await db
+      .prepare(`UPDATE users SET cash = cash + ? WHERE id = ?`)
+      .run(roundMoney(qty * price), userId);
   }
 
   return { marginDelta };
 }
 
-function recordFill(
+async function recordFill(
   db: Db,
   order: Order,
   qty: number,
   price: number,
   ts: string
-): void {
+): Promise<void> {
   const fillId = uuid();
-  db.prepare(
-    `INSERT INTO fills (id, order_id, user_id, symbol, side, quantity, price, ts)
+  await db
+    .prepare(
+      `INSERT INTO fills (id, order_id, user_id, symbol, side, quantity, price, ts)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(fillId, order.id, order.userId, order.symbol, order.side, qty, price, ts);
+    )
+    .run(fillId, order.id, order.userId, order.symbol, order.side, qty, price, ts);
 
-  const { marginDelta } = applyFillToHolding(
+  const { marginDelta } = await applyFillToHolding(
     db,
     order.userId,
     order.symbol,
@@ -310,6 +330,7 @@ function recordFill(
       // Simpler: reduce order reservedCash by margin on the short-filled slice at limit.
       const marginSlice = requiredMargin(shortFilled, order.limitPrice ?? price);
       reservedCash = roundMoney(Math.max(0, reservedCash - marginSlice));
+      void shortPlanned; // kept for the planned-vs-filled short slice comment above
     }
   }
 
@@ -320,10 +341,12 @@ function recordFill(
         ? "partially_filled"
         : order.status;
 
-  db.prepare(
-    `UPDATE orders SET filled_quantity = ?, status = ?, reserved_cash = ?, reserved_shares = ?, updated_at = ?
+  await db
+    .prepare(
+      `UPDATE orders SET filled_quantity = ?, status = ?, reserved_cash = ?, reserved_shares = ?, updated_at = ?
      WHERE id = ?`
-  ).run(filledQuantity, status, reservedCash, reservedShares, ts, order.id);
+    )
+    .run(filledQuantity, status, reservedCash, reservedShares, ts, order.id);
 
   const releasedCash =
     order.side === "buy" && order.type === "limit"
@@ -334,7 +357,7 @@ function recordFill(
       ? Math.min(order.reservedShares, qty)
       : 0;
 
-  appendLedger(db, {
+  await appendLedger(db, {
     type: "ORDER_FILL",
     userId: order.userId,
     symbol: order.symbol,
@@ -362,23 +385,23 @@ function recordFill(
 }
 
 /** Resting opposite-side limits sorted by price-time priority. */
-function loadRestingBook(
+async function loadRestingBook(
   db: Db,
   symbol: string,
   side: Side
-): Order[] {
+): Promise<Order[]> {
   const orderBy =
     side === "buy"
       ? `limit_price DESC, created_at ASC, id ASC`
       : `limit_price ASC, created_at ASC, id ASC`;
-  const rows = db
+  const rows = (await db
     .prepare(
       `SELECT * FROM orders
        WHERE symbol = ? AND side = ? AND type = 'limit'
          AND status IN ('open', 'partially_filled')
        ORDER BY ${orderBy}`
     )
-    .all(symbol, side) as Array<Parameters<typeof rowToOrder>[0]>;
+    .all(symbol, side)) as Array<Parameters<typeof rowToOrder>[0]>;
   return rows.map(rowToOrder);
 }
 
@@ -397,16 +420,16 @@ function pricesCross(
  * Cost to buy `qty` by walking resting asks (maker prices), then any residual at `mid`.
  * Skips makers from `excludeUserId` (self-trade prevention), matching matchAgainstBook.
  */
-export function estimateMarketBuyCost(
+export async function estimateMarketBuyCost(
   db: Db,
   symbol: string,
   qty: number,
   mid: number,
   excludeUserId?: string
-): number {
+): Promise<number> {
   let remaining = roundShares(qty);
   let cost = 0;
-  const asks = loadRestingBook(db, symbol, "sell");
+  const asks = await loadRestingBook(db, symbol, "sell");
   for (const ask of asks) {
     if (excludeUserId && ask.userId === excludeUserId) continue;
     const avail = roundShares(ask.quantity - ask.filledQuantity);
@@ -423,9 +446,14 @@ export function estimateMarketBuyCost(
 }
 
 /** Largest qty affordable at `price` given current free cash (share precision). */
-function affordableBuyQty(db: Db, userId: string, price: number, maxQty: number): number {
+async function affordableBuyQty(
+  db: Db,
+  userId: string,
+  price: number,
+  maxQty: number
+): Promise<number> {
   if (!(price > 0) || maxQty <= 0) return 0;
-  const free = getFreeCash(db, userId);
+  const free = await getFreeCash(db, userId);
   if (free + 1e-9 < price * Math.min(maxQty, 1e-8)) return 0;
   const raw = free / price;
   const qty = roundShares(Math.min(maxQty, raw));
@@ -441,19 +469,19 @@ function affordableBuyQty(db: Db, userId: string, price: number, maxQty: number)
  * Fill price is always the resting (maker) limit. Returns total qty filled on book.
  * Buys never fill more than free cash can pay at the maker price.
  */
-function matchAgainstBook(db: Db, taker: Order, now: string): number {
+async function matchAgainstBook(db: Db, taker: Order, now: string): Promise<number> {
   const opposite: Side = taker.side === "buy" ? "sell" : "buy";
   let filledOnBook = 0;
 
   // Re-load book each pass so partial maker updates are visible; break when no cross.
   while (true) {
-    const takerFresh = getOrder(db, taker.id);
+    const takerFresh = await getOrder(db, taker.id);
     if (!takerFresh) break;
     Object.assign(taker, takerFresh);
     const remaining = roundShares(taker.quantity - taker.filledQuantity);
     if (remaining <= 0) break;
 
-    const book = loadRestingBook(db, taker.symbol, opposite);
+    const book = await loadRestingBook(db, taker.symbol, opposite);
     let matched = false;
     for (const maker of book) {
       if (maker.userId === taker.userId) continue; // no self-trade
@@ -467,14 +495,14 @@ function matchAgainstBook(db: Db, taker: Order, now: string): number {
       const tradePrice = maker.limitPrice!;
       let fillQty = roundShares(Math.min(remaining, makerRem));
       if (taker.side === "buy") {
-        fillQty = affordableBuyQty(db, taker.userId, tradePrice, fillQty);
+        fillQty = await affordableBuyQty(db, taker.userId, tradePrice, fillQty);
       }
       if (fillQty <= 0) {
         if (taker.side === "buy") return filledOnBook;
         continue;
       }
-      recordFill(db, maker, fillQty, tradePrice, now);
-      recordFill(db, taker, fillQty, tradePrice, now);
+      await recordFill(db, maker, fillQty, tradePrice, now);
+      await recordFill(db, taker, fillQty, tradePrice, now);
       filledOnBook = roundShares(filledOnBook + fillQty);
       matched = true;
       break; // restart with refreshed book/taker
@@ -489,12 +517,16 @@ function matchAgainstBook(db: Db, taker: Order, now: string): number {
  * Match resting bids against resting asks while best bid >= best ask.
  * Used after mark-price updates; does not fill at mid without a counterparty.
  */
-export function matchBook(db: Db, symbol: string, now: string = new Date().toISOString()): Order[] {
+export async function matchBook(
+  db: Db,
+  symbol: string,
+  now: string = new Date().toISOString()
+): Promise<Order[]> {
   const touched = new Set<string>();
-  const tx = db.transaction(() => {
+  await db.transaction(async () => {
     while (true) {
-      const bids = loadRestingBook(db, symbol, "buy");
-      const asks = loadRestingBook(db, symbol, "sell");
+      const bids = await loadRestingBook(db, symbol, "buy");
+      const asks = await loadRestingBook(db, symbol, "sell");
       if (bids.length === 0 || asks.length === 0) break;
 
       let pair: { bid: Order; ask: Order } | null = null;
@@ -520,14 +552,18 @@ export function matchBook(db: Db, symbol: string, now: string = new Date().toISO
         (pair.bid.createdAt === pair.ask.createdAt && pair.bid.id < pair.ask.id);
       const tradePrice = bidFirst ? pair.bid.limitPrice! : pair.ask.limitPrice!;
 
-      recordFill(db, pair.bid, fillQty, tradePrice, now);
-      recordFill(db, pair.ask, fillQty, tradePrice, now);
+      await recordFill(db, pair.bid, fillQty, tradePrice, now);
+      await recordFill(db, pair.ask, fillQty, tradePrice, now);
       touched.add(pair.bid.id);
       touched.add(pair.ask.id);
     }
   });
-  tx();
-  return [...touched].map((id) => getOrder(db, id)!).filter(Boolean);
+  const orders: Order[] = [];
+  for (const id of touched) {
+    const o = await getOrder(db, id);
+    if (o) orders.push(o);
+  }
+  return orders;
 }
 
 /**
@@ -535,13 +571,13 @@ export function matchBook(db: Db, symbol: string, now: string = new Date().toISO
  * `mid` / `maxFillFraction` are retained for call-site compatibility but do not
  * force mid-print fills — quantity is consumed across opposing resting orders.
  */
-export function matchOpenLimits(
+export async function matchOpenLimits(
   db: Db,
   symbol: string,
   _mid?: number,
   now: string = new Date().toISOString(),
   _maxFillFraction: number = 1
-): Order[] {
+): Promise<Order[]> {
   return matchBook(db, symbol, now);
 }
 
@@ -560,7 +596,7 @@ export type PlaceOrderResult =
   | { ok: true; order: Order; statusCode: number }
   | { ok: false; error: string; statusCode: number };
 
-export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
+export async function placeOrder(db: Db, input: PlaceOrderInput): Promise<PlaceOrderResult> {
   const now = input.now ?? new Date().toISOString();
   const { userId, symbol, side, type, quantity, idempotencyKey } = input;
   const limitPrice = input.limitPrice ?? null;
@@ -569,7 +605,7 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     return { ok: false, error: "Idempotency-Key header is required", statusCode: 400 };
   }
 
-  const cached = getIdempotentResponse(db, userId, idempotencyKey);
+  const cached = await getIdempotentResponse(db, userId, idempotencyKey);
   if (cached) {
     return {
       ok: true,
@@ -591,12 +627,12 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     return { ok: false, error: "limitPrice required for limit orders", statusCode: 400 };
   }
 
-  const asset = getAsset(db, symbol);
+  const asset = await getAsset(db, symbol);
   if (!asset) {
     return { ok: false, error: `Unknown symbol: ${symbol}`, statusCode: 404 };
   }
 
-  if (isTradingHalted(db, symbol)) {
+  if (await isTradingHalted(db, symbol)) {
     return {
       ok: false,
       error: `Trading halted for ${symbol}`,
@@ -604,7 +640,7 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     };
   }
 
-  const circuit = isCircuitOpen(db, symbol, now);
+  const circuit = await isCircuitOpen(db, symbol, now);
   if (circuit.open) {
     return {
       ok: false,
@@ -613,8 +649,8 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     };
   }
 
-  const placeTx = db.transaction((): PlaceOrderResult => {
-    const again = getIdempotentResponse(db, userId, idempotencyKey);
+  const result = await db.transaction(async (): Promise<PlaceOrderResult> => {
+    const again = await getIdempotentResponse(db, userId, idempotencyKey);
     if (again) {
       return {
         ok: true,
@@ -627,19 +663,19 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     let reservedShares = 0;
 
     const otherReservedShares = (
-      db
+      (await db
         .prepare(
           `SELECT COALESCE(SUM(reserved_shares), 0) AS s FROM orders
            WHERE user_id = ? AND symbol = ? AND status IN ('open', 'partially_filled')`
         )
-        .get(userId, symbol) as { s: number }
+        .get(userId, symbol)) as { s: number }
     ).s;
-    const held = getHoldingQty(db, userId, symbol);
+    const held = await getHoldingQty(db, userId, symbol);
     const availableLong = Math.max(0, held - otherReservedShares);
 
     if (type === "limit" && side === "buy") {
       reservedCash = roundMoney(quantity * (limitPrice as number));
-      if (getFreeCash(db, userId) + 1e-9 < reservedCash) {
+      if ((await getFreeCash(db, userId)) + 1e-9 < reservedCash) {
         return { ok: false, error: "Insufficient cash to reserve for limit buy", statusCode: 400 };
       }
     }
@@ -650,7 +686,7 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
       reservedShares = longPortion;
       if (shortPortion > 0) {
         reservedCash = requiredMargin(shortPortion, limitPrice as number);
-        if (getFreeCash(db, userId) + 1e-9 < reservedCash) {
+        if ((await getFreeCash(db, userId)) + 1e-9 < reservedCash) {
           return {
             ok: false,
             error: "Insufficient margin for short limit sell",
@@ -662,14 +698,14 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
 
     if (type === "market" && side === "buy") {
       // Walk the ask book at maker prices, then residual at mid — not mark * qty.
-      const cost = estimateMarketBuyCost(
+      const cost = await estimateMarketBuyCost(
         db,
         symbol,
         quantity,
         asset.price,
         userId
       );
-      if (getFreeCash(db, userId) + 1e-9 < cost) {
+      if ((await getFreeCash(db, userId)) + 1e-9 < cost) {
         return { ok: false, error: "Insufficient cash for market buy", statusCode: 400 };
       }
     }
@@ -678,7 +714,7 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
       const shortPortion = roundShares(Math.max(0, quantity - availableLong));
       if (shortPortion > 0) {
         const margin = requiredMargin(shortPortion, asset.price);
-        if (getFreeCash(db, userId) + 1e-9 < margin) {
+        if ((await getFreeCash(db, userId)) + 1e-9 < margin) {
           return {
             ok: false,
             error: "Insufficient margin for short sell",
@@ -707,38 +743,40 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     };
 
     try {
-      db.prepare(
-        `INSERT INTO orders (
+      await db
+        .prepare(
+          `INSERT INTO orders (
           id, user_id, symbol, side, type, quantity, filled_quantity, limit_price,
           status, reserved_cash, reserved_shares, created_at, updated_at, idempotency_key
         ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        order.id,
-        order.userId,
-        order.symbol,
-        order.side,
-        order.type,
-        order.quantity,
-        order.limitPrice,
-        order.status,
-        order.reservedCash,
-        order.reservedShares,
-        order.createdAt,
-        order.updatedAt,
-        order.idempotencyKey
-      );
+        )
+        .run(
+          order.id,
+          order.userId,
+          order.symbol,
+          order.side,
+          order.type,
+          order.quantity,
+          order.limitPrice,
+          order.status,
+          order.reservedCash,
+          order.reservedShares,
+          order.createdAt,
+          order.updatedAt,
+          order.idempotencyKey
+        );
     } catch (err) {
       const msg = String((err as Error).message ?? err);
       if (msg.includes("UNIQUE") && msg.includes("idempotency")) {
-        const existing = db
+        const existing = (await db
           .prepare(`SELECT * FROM orders WHERE user_id = ? AND idempotency_key = ?`)
-          .get(userId, idempotencyKey) as Parameters<typeof rowToOrder>[0];
+          .get(userId, idempotencyKey)) as Parameters<typeof rowToOrder>[0];
         return { ok: true, order: rowToOrder(existing), statusCode: 201 };
       }
       throw err;
     }
 
-    appendLedger(db, {
+    await appendLedger(db, {
       type: "ORDER_PLACED",
       userId,
       symbol,
@@ -755,28 +793,27 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     });
 
     // Price-time match against resting opposite book first.
-    matchAgainstBook(db, order, now);
-    const afterBook = getOrder(db, order.id)!;
+    await matchAgainstBook(db, order, now);
+    const afterBook = (await getOrder(db, order.id))!;
     Object.assign(order, afterBook);
 
     let remaining = roundShares(order.quantity - order.filledQuantity);
     if (remaining > 0 && type === "market") {
       if (side === "buy") {
-        remaining = affordableBuyQty(db, userId, asset.price, remaining);
+        remaining = await affordableBuyQty(db, userId, asset.price, remaining);
       }
       if (remaining > 0) {
         // Residual market quantity lifts/hits synthetic mid liquidity (single-asset mark).
-        recordFill(db, order, remaining, asset.price, now);
+        await recordFill(db, order, remaining, asset.price, now);
       }
     }
 
-    const fresh = getOrder(db, order.id)!;
+    const fresh = (await getOrder(db, order.id))!;
     return { ok: true, order: fresh, statusCode: 201 };
   });
 
-  const result = placeTx();
   if (result.ok) {
-    saveIdempotentResponse(db, userId, idempotencyKey, result.statusCode, {
+    await saveIdempotentResponse(db, userId, idempotencyKey, result.statusCode, {
       order: result.order,
     });
   }
@@ -787,13 +824,13 @@ export type CancelResult =
   | { ok: true; order: Order }
   | { ok: false; error: string; statusCode: number };
 
-export function cancelOrder(
+export async function cancelOrder(
   db: Db,
   userId: string,
   orderId: string,
   now: string = new Date().toISOString()
-): CancelResult {
-  const order = getOrder(db, orderId);
+): Promise<CancelResult> {
+  const order = await getOrder(db, orderId);
   if (!order) return { ok: false, error: "Order not found", statusCode: 404 };
   if (order.userId !== userId) {
     return { ok: false, error: "Order not found", statusCode: 404 };
@@ -806,13 +843,15 @@ export function cancelOrder(
     };
   }
 
-  const tx = db.transaction(() => {
-    db.prepare(
-      `UPDATE orders SET status = 'cancelled', reserved_cash = 0, reserved_shares = 0, updated_at = ?
+  await db.transaction(async () => {
+    await db
+      .prepare(
+        `UPDATE orders SET status = 'cancelled', reserved_cash = 0, reserved_shares = 0, updated_at = ?
        WHERE id = ?`
-    ).run(now, orderId);
+      )
+      .run(now, orderId);
 
-    appendLedger(db, {
+    await appendLedger(db, {
       type: "ORDER_CANCELLED",
       userId,
       symbol: order.symbol,
@@ -825,6 +864,5 @@ export function cancelOrder(
       ts: now,
     });
   });
-  tx();
-  return { ok: true, order: getOrder(db, orderId)! };
+  return { ok: true, order: (await getOrder(db, orderId))! };
 }

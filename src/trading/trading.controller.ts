@@ -27,7 +27,7 @@ export class TradingController {
 
   @Post()
   @HttpCode(201)
-  placeOrder(
+  async placeOrder(
     @CurrentUser() user: AuthUser,
     @Req() req: Request,
     @Body()
@@ -44,12 +44,12 @@ export class TradingController {
       throw new BadRequestException("Idempotency-Key header is required");
     }
 
-    const cached = getIdempotentResponse(this.db, user.userId, idempotencyKey);
+    const cached = await getIdempotentResponse(this.db, user.userId, idempotencyKey);
     if (cached) {
       return cached.body;
     }
 
-    const result = placeOrder(this.db, {
+    const result = await placeOrder(this.db, {
       userId: user.userId,
       symbol: String(body?.symbol ?? ""),
       side: body?.side as "buy" | "sell",
@@ -70,8 +70,8 @@ export class TradingController {
   }
 
   @Delete(":id")
-  cancelOrder(@CurrentUser() user: AuthUser, @Param("id") id: string) {
-    const result = cancelOrder(this.db, user.userId, String(id));
+  async cancelOrder(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    const result = await cancelOrder(this.db, user.userId, String(id));
     if (!result.ok) {
       throw new HttpErrorFromResult(result.statusCode, result.error);
     }

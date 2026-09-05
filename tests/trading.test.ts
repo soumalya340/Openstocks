@@ -171,9 +171,9 @@ describe("trading engine", () => {
     // Use wall-clock-relative stamps so the 30s halt is still open when we place.
     const t0 = new Date(Date.now() - 20_000).toISOString();
     const t1 = new Date(Date.now() - 5_000).toISOString();
-    setPrice(db, "vVAN", 310.1, t0);
+    await setPrice(db, "vVAN", 310.1, t0);
     // >15% up from 310.1 → ~356.6+
-    setPrice(db, "vVAN", 360, t1);
+    await setPrice(db, "vVAN", 360, t1);
 
     const rejected = await request(ctx.app)
       .post("/orders")

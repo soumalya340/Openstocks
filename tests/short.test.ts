@@ -52,7 +52,7 @@ describe("short selling with margin", () => {
 
     // Ledger replay agrees
     const at = new Date().toISOString();
-    const hist = getPortfolioAt(db, userId, at);
+    const hist = await getPortfolioAt(db, userId, at);
     const histHolding = hist.holdings.find((h) => h.symbol === "vSOL");
     expect(histHolding?.quantity).toBe(-qty);
     expect(hist.reservedCash).toBe(margin);
@@ -66,7 +66,7 @@ describe("short selling with margin", () => {
     const { token, userId } = await login(ctx.app, "broke");
 
     // Drain cash so free cash < margin for a large short
-    db.prepare(`UPDATE users SET cash = ? WHERE id = ?`).run(100, userId);
+    await db.prepare(`UPDATE users SET cash = ? WHERE id = ?`).run(100, userId);
 
     const res = await request(ctx.app)
       .post("/orders")
@@ -77,7 +77,7 @@ describe("short selling with margin", () => {
 
     expect(res.body.error).toMatch(/margin/i);
 
-    const portfolio = getPortfolio(db, userId);
+    const portfolio = await getPortfolio(db, userId);
     expect(portfolio.holdings).toEqual([]);
     expect(portfolio.cash).toBe(100);
   });
@@ -88,7 +88,7 @@ describe("short selling with margin", () => {
     nestApp = ctx.nestApp;
     const { token, userId } = await login(ctx.app, "cover");
 
-    const open = placeOrder(db, {
+    const open = await placeOrder(db, {
       userId,
       symbol: "vATL",
       side: "sell",
@@ -98,7 +98,7 @@ describe("short selling with margin", () => {
     });
     expect(open.ok).toBe(true);
 
-    const afterShort = getPortfolio(db, userId);
+    const afterShort = await getPortfolio(db, userId);
     const shortH = afterShort.holdings.find((h) => h.symbol === "vATL")!;
     expect(shortH.quantity).toBe(-10);
     const marginBefore = shortH.marginReserved;
@@ -131,7 +131,7 @@ describe("short selling with margin", () => {
       .send({ symbol: "vATL", side: "buy", type: "market", quantity: 5 })
       .expect(201);
 
-    const flat = getPortfolio(db, userId);
+    const flat = await getPortfolio(db, userId);
     expect(flat.holdings.find((x) => x.symbol === "vATL")).toBeUndefined();
     expect(flat.reservedCash).toBe(0);
   });

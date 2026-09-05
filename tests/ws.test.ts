@@ -35,7 +35,7 @@ describe("WebSocket price streaming", () => {
         reject(err);
       });
       socket.on("connect", () => {
-        setPrice(db, "vSOL", 425.5, "2026-01-02T00:00:00.000Z");
+        void setPrice(db, "vSOL", 425.5, "2026-01-02T00:00:00.000Z").catch(reject);
       });
       socket.on("price", (payload: { symbol: string; price: number }) => {
         clearTimeout(timer);

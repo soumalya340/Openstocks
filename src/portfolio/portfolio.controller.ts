@@ -12,19 +12,19 @@ export class PortfolioController {
   constructor(@Inject(DB_CONNECTION) private readonly db: Db) {}
 
   @Get()
-  getPortfolio(@CurrentUser() user: AuthUser) {
-    const portfolio = getPortfolio(this.db, user.userId);
+  async getPortfolio(@CurrentUser() user: AuthUser) {
+    const portfolio = await getPortfolio(this.db, user.userId);
     return { portfolio };
   }
 
   @Get("history")
-  getHistory(@CurrentUser() user: AuthUser, @Query("at") at?: string) {
+  async getHistory(@CurrentUser() user: AuthUser, @Query("at") at?: string) {
     const atValue = String(at ?? "");
     if (!atValue) {
       throw new BadRequestException("Query param 'at' (ISO timestamp) is required");
     }
     try {
-      const portfolio = getPortfolioAt(this.db, user.userId, atValue);
+      const portfolio = await getPortfolioAt(this.db, user.userId, atValue);
       return { portfolio, reconstructedFrom: "ledger" };
     } catch (e) {
       throw new BadRequestException((e as Error).message);

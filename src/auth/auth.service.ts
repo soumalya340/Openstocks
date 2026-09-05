@@ -11,21 +11,21 @@ import type { AuthUser } from "./auth.types.js";
 export class AuthService {
   constructor(@Inject(DB_CONNECTION) private readonly db: Db) {}
 
-  ensureUser(username: string): AuthUser {
-    const existing = this.db
+  async ensureUser(username: string): Promise<AuthUser> {
+    const existing = (await this.db
       .prepare(`SELECT id, username FROM users WHERE username = ?`)
-      .get(username) as { id: string; username: string } | undefined;
+      .get(username)) as { id: string; username: string } | undefined;
     if (existing) {
       return { userId: existing.id, username: existing.username };
     }
     const userId = uuid();
     const now = new Date().toISOString();
-    this.db
+    await this.db
       .prepare(
         `INSERT INTO users (id, username, cash, created_at) VALUES (?, ?, ?, ?)`
       )
       .run(userId, username, INITIAL_CASH, now);
-    appendLedger(this.db, {
+    await appendLedger(this.db, {
       type: "USER_CREATED",
       userId,
       payload: { username, cash: INITIAL_CASH },

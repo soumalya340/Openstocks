@@ -32,14 +32,14 @@ describe("portfolio + ledger history", () => {
     const t2 = "2026-06-01T11:00:00.000Z";
     const t3 = "2026-06-01T12:00:00.000Z";
     const tBetween = "2026-06-01T10:30:00.000Z";
-    db.prepare(`UPDATE ledger SET ts = ? WHERE user_id = ? AND type = 'USER_CREATED'`).run(
+    await db.prepare(`UPDATE ledger SET ts = ? WHERE user_id = ? AND type = 'USER_CREATED'`).run(
       t0,
       userId
     );
-    db.prepare(`UPDATE users SET created_at = ? WHERE id = ?`).run(t0, userId);
+    await db.prepare(`UPDATE users SET created_at = ? WHERE id = ?`).run(t0, userId);
 
     // First buy at t1: 2 vSOL @ 420
-    const r1 = placeOrder(db, {
+    const r1 = await placeOrder(db, {
       userId,
       symbol: "vSOL",
       side: "buy",
@@ -51,7 +51,7 @@ describe("portfolio + ledger history", () => {
     expect(r1.ok).toBe(true);
 
     // Second buy at t2: 1 vATL @ 95.5
-    const r2 = placeOrder(db, {
+    const r2 = await placeOrder(db, {
       userId,
       symbol: "vATL",
       side: "buy",
@@ -108,14 +108,14 @@ describe("portfolio + ledger history", () => {
     const t2 = "2026-07-01T10:05:00.000Z";
     const t3 = "2026-07-01T10:10:00.000Z";
     const tAfter = "2026-07-01T10:15:00.000Z";
-    db.prepare(`UPDATE ledger SET ts = ? WHERE user_id = ? AND type = 'USER_CREATED'`).run(
+    await db.prepare(`UPDATE ledger SET ts = ? WHERE user_id = ? AND type = 'USER_CREATED'`).run(
       t0,
       userId
     );
-    db.prepare(`UPDATE users SET created_at = ? WHERE id = ?`).run(t0, userId);
+    await db.prepare(`UPDATE users SET created_at = ? WHERE id = ?`).run(t0, userId);
 
     // Two resting limit buys below market (vSOL @ 420): reserve 2000 each
-    const a = placeOrder(db, {
+    const a = await placeOrder(db, {
       userId,
       symbol: "vSOL",
       side: "buy",
@@ -125,7 +125,7 @@ describe("portfolio + ledger history", () => {
       idempotencyKey: "lim-a",
       now: t1,
     });
-    const b = placeOrder(db, {
+    const b = await placeOrder(db, {
       userId,
       symbol: "vSOL",
       side: "buy",
@@ -141,18 +141,18 @@ describe("portfolio + ledger history", () => {
     expect(a.order.reservedCash).toBe(2000);
     expect(b.order.reservedCash).toBe(2000);
 
-    const cancelled = cancelOrder(db, userId, a.order.id, t3);
+    const cancelled = await cancelOrder(db, userId, a.order.id, t3);
     expect(cancelled.ok).toBe(true);
     if (cancelled.ok) {
       expect(cancelled.order.status).toBe("cancelled");
     }
 
     // Assert only one cancel release event was written (no duplicate RESERVATION_RELEASE).
-    const cancelEvents = db
+    const cancelEvents = (await db
       .prepare(
         `SELECT type FROM ledger WHERE user_id = ? AND ts = ? AND type IN ('ORDER_CANCELLED', 'RESERVATION_RELEASE')`
       )
-      .all(userId, t3) as Array<{ type: string }>;
+      .all(userId, t3)) as Array<{ type: string }>;
     expect(cancelEvents.map((e) => e.type)).toEqual(["ORDER_CANCELLED"]);
 
     const live = await request(ctx.app)

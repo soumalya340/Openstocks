@@ -12,6 +12,8 @@ import { env } from "./env.js";
 
 export interface AppModuleOptions {
   dbPath?: string;
+  /** Pass `null` in tests to force SQLite even if DATABASE_URL is set. */
+  databaseUrl?: string | null;
   throttleTtlMs?: number;
   throttleLimit?: number;
 }
@@ -35,12 +37,16 @@ export class AppModule {
             name: "default",
             ttl,
             limit,
-            // Global per-IP budget (not per-route): 1 rpm means 1 request to the whole API.
+            // Global per-IP budget (not per-route).
             generateKey: (_context, tracker, throttlerName) =>
               `global:${throttlerName}:${tracker}`,
           },
         ]),
-        DatabaseModule.forRoot(opts.dbPath),
+        DatabaseModule.forRoot({
+          dbPath: opts.dbPath ?? env.DB_PATH,
+          databaseUrl:
+            opts.databaseUrl === undefined ? env.DATABASE_URL : opts.databaseUrl,
+        }),
         HealthModule,
         AuthModule,
         MarketModule,
