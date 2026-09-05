@@ -4,7 +4,6 @@ import { createTestApp, login, auth } from "./helpers.js";
 import type { Db } from "../src/db.js";
 import type { INestApplication } from "@nestjs/common";
 import { setPrice } from "../src/market/index.js";
-import { matchOpenLimits } from "../src/trading/index.js";
 
 describe("trading engine", () => {
   let db: Db;
@@ -95,63 +94,72 @@ describe("trading engine", () => {
     expect(holding.quantity).toBe(1);
   });
 
-  it("partially fills a limit order then cancels the remainder", async () => {
+  it("partially fills a limit order against a counterparty then cancels the remainder", async () => {
     const ctx = await createTestApp();
     db = ctx.db;
     nestApp = ctx.nestApp;
-    const { token } = await login(ctx.app);
+    const buyer = await login(ctx.app, "buyer");
+    const seller = await login(ctx.app, "seller");
 
-    // Limit buy below market — rests
-    const placed = await request(ctx.app)
+    // Seller rests 10 @ 400
+    const sell = await request(ctx.app)
       .post("/orders")
-      .set(auth(token))
-      .set("Idempotency-Key", "lim-1")
+      .set(auth(seller.token))
+      .set("Idempotency-Key", "lim-sell-1")
       .send({
         symbol: "vSOL",
-        side: "buy",
+        side: "sell",
         type: "limit",
         quantity: 10,
         limitPrice: 400,
       })
       .expect(201);
-    expect(placed.body.order.status).toBe("open");
-    expect(placed.body.order.reservedCash).toBe(4000);
+    // No shares held → short limit; margin reserved (50% * 10 * 400 = 2000)
+    expect(sell.body.order.status).toBe("open");
+    expect(sell.body.order.reservedCash).toBe(2000);
 
-    const mid = await request(ctx.app)
+    // Buyer takes 4 @ 400 — maker price, partial consume
+    const buy = await request(ctx.app)
+      .post("/orders")
+      .set(auth(buyer.token))
+      .set("Idempotency-Key", "lim-buy-1")
+      .send({
+        symbol: "vSOL",
+        side: "buy",
+        type: "limit",
+        quantity: 4,
+        limitPrice: 400,
+      })
+      .expect(201);
+    expect(buy.body.order.status).toBe("filled");
+    expect(buy.body.order.filledQuantity).toBe(4);
+
+    const sellAfter = await request(ctx.app)
       .get("/portfolio")
-      .set(auth(token))
+      .set(auth(seller.token))
       .expect(200);
-    expect(mid.body.portfolio.reservedCash).toBe(4000);
-    // Cash not yet spent
-    expect(mid.body.portfolio.cash).toBe(100000);
-
-    // Price crosses limit; fill 40% of remaining
-    const now = new Date().toISOString();
-    setPrice(db, "vSOL", 400, now);
-    matchOpenLimits(db, "vSOL", 400, now, 0.4);
-
-    const afterPartial = await request(ctx.app)
-      .get("/portfolio")
-      .set(auth(token))
-      .expect(200);
-    const holding = afterPartial.body.portfolio.holdings.find(
+    const sellHolding = sellAfter.body.portfolio.holdings.find(
       (h: { symbol: string }) => h.symbol === "vSOL"
     );
-    expect(holding.quantity).toBeCloseTo(4, 6);
-    expect(afterPartial.body.portfolio.cash).toBeCloseTo(100000 - 4 * 400, 2);
+    expect(sellHolding.quantity).toBeCloseTo(-4, 6);
+    expect(sellAfter.body.portfolio.cash).toBeCloseTo(100000 + 4 * 400, 2);
+
+    const buyPort = await request(ctx.app)
+      .get("/portfolio")
+      .set(auth(buyer.token))
+      .expect(200);
+    const buyHolding = buyPort.body.portfolio.holdings.find(
+      (h: { symbol: string }) => h.symbol === "vSOL"
+    );
+    expect(buyHolding.quantity).toBeCloseTo(4, 6);
+    expect(buyPort.body.portfolio.cash).toBeCloseTo(100000 - 4 * 400, 2);
 
     const cancelled = await request(ctx.app)
-      .delete(`/orders/${placed.body.order.id}`)
-      .set(auth(token))
+      .delete(`/orders/${sell.body.order.id}`)
+      .set(auth(seller.token))
       .expect(200);
     expect(cancelled.body.order.status).toBe("cancelled");
     expect(cancelled.body.order.reservedCash).toBe(0);
-
-    const finalPort = await request(ctx.app)
-      .get("/portfolio")
-      .set(auth(token))
-      .expect(200);
-    expect(finalPort.body.portfolio.reservedCash).toBe(0);
   });
 
   it("trips circuit breaker after >15% move in 60s and rejects new orders", async () => {

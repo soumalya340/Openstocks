@@ -15,7 +15,7 @@ function roundShares(n: number): number {
 interface ReplayState {
   cash: number;
   reservedCash: number;
-  holdings: Map<string, { quantity: number; costBasis: number }>;
+  holdings: Map<string, { quantity: number; costBasis: number; marginReserved: number }>;
   prices: Map<string, number>;
   exists: boolean;
 }
@@ -32,7 +32,6 @@ function emptyState(seedPrices: Map<string, number>): ReplayState {
 
 function applyEvent(state: ReplayState, event: LedgerEvent, userId: string): void {
   if (event.userId && event.userId !== userId) {
-    // Global price ticks still apply
     if (event.type !== "PRICE_TICK") return;
   }
 
@@ -55,20 +54,73 @@ function applyEvent(state: ReplayState, event: LedgerEvent, userId: string): voi
       const qty = Number(event.payload.quantity);
       const price = Number(event.payload.price);
       const symbol = event.symbol!;
-      const h = state.holdings.get(symbol) ?? { quantity: 0, costBasis: 0 };
+      const h = state.holdings.get(symbol) ?? {
+        quantity: 0,
+        costBasis: 0,
+        marginReserved: 0,
+      };
       const releasedCash = Number(event.payload.releasedCash ?? 0);
       if (releasedCash > 0) {
         state.reservedCash = roundMoney(Math.max(0, state.reservedCash - releasedCash));
       }
+      const marginDelta = Number(event.payload.marginDelta ?? 0);
+      if (marginDelta !== 0) {
+        // Margin moves from free → holdings collateral (or reverse on cover).
+        // Order-level short margin was already in reservedCash via ORDER_PLACED;
+        // when fill posts holdings margin, drop the matching order reserve if present.
+        h.marginReserved = roundMoney(Math.max(0, h.marginReserved + marginDelta));
+        if (marginDelta > 0) {
+          // Transfer: order reserved cash → holdings margin (net reservedCash unchanged
+          // if the order had reserved it; if market short with no prior reserve, increase).
+          const orderType = String(event.payload.type ?? "");
+          if (orderType === "market") {
+            state.reservedCash = roundMoney(state.reservedCash + marginDelta);
+          }
+          // limit short: reservedCash already counted at ORDER_PLACED; holdings margin
+          // is tracked on the holding — avoid double-count by not adding again.
+        } else {
+          // Cover releases holdings margin out of reservedCash.
+          state.reservedCash = roundMoney(
+            Math.max(0, state.reservedCash + marginDelta)
+          );
+        }
+      }
 
       if (side === "buy") {
-        h.quantity = roundShares(h.quantity + qty);
-        h.costBasis = roundMoney(h.costBasis + qty * price);
+        if (h.quantity >= 0) {
+          h.quantity = roundShares(h.quantity + qty);
+          h.costBasis = roundMoney(h.costBasis + qty * price);
+        } else {
+          const shortQty = -h.quantity;
+          if (qty + 1e-12 < shortQty) {
+            const avg = h.costBasis / h.quantity;
+            h.quantity = roundShares(h.quantity + qty);
+            h.costBasis = roundMoney(avg * h.quantity);
+          } else if (Math.abs(qty - shortQty) <= 1e-12) {
+            h.quantity = 0;
+            h.costBasis = 0;
+            h.marginReserved = 0;
+          } else {
+            const longQty = roundShares(qty - shortQty);
+            h.quantity = longQty;
+            h.costBasis = roundMoney(longQty * price);
+            h.marginReserved = 0;
+          }
+        }
         state.cash = roundMoney(state.cash - qty * price);
       } else {
-        const avg = h.quantity > 0 ? h.costBasis / h.quantity : price;
-        h.quantity = roundShares(h.quantity - qty);
-        h.costBasis = roundMoney(avg * h.quantity);
+        if (h.quantity + 1e-12 >= qty) {
+          const avg = h.quantity > 0 ? h.costBasis / h.quantity : price;
+          h.quantity = roundShares(h.quantity - qty);
+          h.costBasis = roundMoney(avg * h.quantity);
+        } else if (h.quantity > 0) {
+          const shortOpened = roundShares(qty - h.quantity);
+          h.quantity = roundShares(-shortOpened);
+          h.costBasis = roundMoney(-shortOpened * price);
+        } else {
+          h.quantity = roundShares(h.quantity - qty);
+          h.costBasis = roundMoney(h.costBasis - qty * price);
+        }
         state.cash = roundMoney(state.cash + qty * price);
       }
       state.holdings.set(symbol, h);
@@ -100,16 +152,19 @@ function snapshotFromState(
   const holdings: Holding[] = [];
   let totalMarketValue = 0;
   let totalCostBasis = 0;
+  let holdingsMargin = 0;
 
   for (const [symbol, h] of state.holdings) {
     if (Math.abs(h.quantity) < 1e-12) continue;
     const marketPrice = state.prices.get(symbol) ?? getFallbackPrice(symbol);
     const marketValue = roundMoney(h.quantity * marketPrice);
     const unrealizedPnl = roundMoney(marketValue - h.costBasis);
+    holdingsMargin = roundMoney(holdingsMargin + h.marginReserved);
     holdings.push({
       symbol,
       quantity: h.quantity,
       costBasis: h.costBasis,
+      marginReserved: h.marginReserved,
       marketPrice,
       marketValue,
       unrealizedPnl,
@@ -120,10 +175,16 @@ function snapshotFromState(
 
   holdings.sort((a, b) => a.symbol.localeCompare(b.symbol));
 
+  // reservedCash in replay tracks order reservations + market-short margin.
+  // Ensure holdings margin for limit-short fills is reflected: for limit shorts,
+  // margin lived in order reservedCash then transferred — holdingsMargin should
+  // already be inside reservedCash. Use max to avoid under-count.
+  const reservedCash = roundMoney(Math.max(state.reservedCash, holdingsMargin));
+
   return {
     userId,
     cash: state.cash,
-    reservedCash: state.reservedCash,
+    reservedCash,
     holdings,
     totalMarketValue: roundMoney(totalMarketValue),
     totalCostBasis: roundMoney(totalCostBasis),
@@ -151,7 +212,7 @@ export function getPortfolio(db: Db, userId: string): PortfolioSnapshot {
     throw new Error("User not found");
   }
 
-  const reservedCash = (
+  const orderReserved = (
     db
       .prepare(
         `SELECT COALESCE(SUM(reserved_cash), 0) AS s FROM orders
@@ -161,8 +222,15 @@ export function getPortfolio(db: Db, userId: string): PortfolioSnapshot {
   ).s;
 
   const rows = db
-    .prepare(`SELECT symbol, quantity, cost_basis FROM holdings WHERE user_id = ?`)
-    .all(userId) as Array<{ symbol: string; quantity: number; cost_basis: number }>;
+    .prepare(
+      `SELECT symbol, quantity, cost_basis, margin_reserved FROM holdings WHERE user_id = ?`
+    )
+    .all(userId) as Array<{
+    symbol: string;
+    quantity: number;
+    cost_basis: number;
+    margin_reserved: number;
+  }>;
 
   const assets = listAssets(db);
   const priceMap = new Map(assets.map((a) => [a.symbol, a.price]));
@@ -170,16 +238,20 @@ export function getPortfolio(db: Db, userId: string): PortfolioSnapshot {
   const holdings: Holding[] = [];
   let totalMarketValue = 0;
   let totalCostBasis = 0;
+  let marginReserved = 0;
 
   for (const r of rows) {
+    if (Math.abs(r.quantity) < 1e-12 && r.margin_reserved < 1e-9) continue;
     if (Math.abs(r.quantity) < 1e-12) continue;
     const marketPrice = priceMap.get(r.symbol) ?? 0;
     const marketValue = roundMoney(r.quantity * marketPrice);
     const unrealizedPnl = roundMoney(marketValue - r.cost_basis);
+    marginReserved = roundMoney(marginReserved + r.margin_reserved);
     holdings.push({
       symbol: r.symbol,
       quantity: r.quantity,
       costBasis: r.cost_basis,
+      marginReserved: r.margin_reserved,
       marketPrice,
       marketValue,
       unrealizedPnl,
@@ -193,7 +265,7 @@ export function getPortfolio(db: Db, userId: string): PortfolioSnapshot {
   return {
     userId,
     cash: user.cash,
-    reservedCash,
+    reservedCash: roundMoney(orderReserved + marginReserved),
     holdings,
     totalMarketValue: roundMoney(totalMarketValue),
     totalCostBasis: roundMoney(totalCostBasis),
@@ -215,7 +287,6 @@ export function getPortfolioAt(
     throw new Error("Invalid timestamp");
   }
 
-  // Seed prices from earliest known history at-or-before `at`, else seed defaults.
   const seedPrices = new Map<string, number>();
   for (const a of listAssets(db)) {
     const hist = db
@@ -232,7 +303,6 @@ export function getPortfolioAt(
     applyEvent(state, event, userId);
   }
 
-  // If user did not exist yet at `at`, return empty portfolio.
   if (!state.exists) {
     return {
       userId,

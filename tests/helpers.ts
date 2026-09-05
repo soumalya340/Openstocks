@@ -3,20 +3,33 @@ import request from "supertest";
 import type { Express } from "express";
 import { Test } from "@nestjs/testing";
 import type { INestApplication } from "@nestjs/common";
-import { AppModule } from "../src/app.module.js";
+import { IoAdapter } from "@nestjs/platform-socket.io";
+import { AppModule, type AppModuleOptions } from "../src/app.module.js";
 import { DB_CONNECTION } from "../src/database/database.tokens.js";
 import type { Db } from "../src/db.js";
 
-export async function createTestApp(): Promise<{
+export async function createTestApp(
+  options: AppModuleOptions = {}
+): Promise<{
   app: Express;
   db: Db;
   nestApp: INestApplication;
 }> {
+  // Tests exercise many routes per suite; keep a high budget unless a test
+  // explicitly opts into production-like 1 rpm via throttleLimit.
   const moduleRef = await Test.createTestingModule({
-    imports: [AppModule.forRoot(":memory:")],
+    imports: [
+      AppModule.forRoot({
+        dbPath: ":memory:",
+        throttleLimit: 10_000,
+        throttleTtlMs: 60_000,
+        ...options,
+      }),
+    ],
   }).compile();
 
   const nestApp = moduleRef.createNestApplication();
+  nestApp.useWebSocketAdapter(new IoAdapter(nestApp));
   await nestApp.init();
 
   const db = moduleRef.get<Db>(DB_CONNECTION);

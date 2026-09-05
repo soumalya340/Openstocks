@@ -54,7 +54,9 @@ export type LedgerEventType =
   | "ORDER_FILL"
   | "ORDER_CANCELLED"
   | "RESERVATION_RELEASE"
-  | "PRICE_TICK";
+  | "PRICE_TICK"
+  | "TRADING_HALTED"
+  | "TRADING_RESUMED";
 
 export interface LedgerEvent {
   id: string;
@@ -69,6 +71,8 @@ export interface Holding {
   symbol: string;
   quantity: number;
   costBasis: number;
+  /** Cash reserved as short-sale margin collateral for this symbol. */
+  marginReserved: number;
   marketPrice: number;
   marketValue: number;
   unrealizedPnl: number;
@@ -77,6 +81,7 @@ export interface Holding {
 export interface PortfolioSnapshot {
   userId: string;
   cash: number;
+  /** Limit-buy reservations + short-sale margin collateral. */
   reservedCash: number;
   holdings: Holding[];
   totalMarketValue: number;

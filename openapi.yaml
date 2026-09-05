@@ -1,8 +1,17 @@
 openapi: 3.0.3
 info:
   title: OpenStocks API
-  version: 1.0.0
-  description: Tokenized pre-IPO trading platform (take-home).
+  version: 1.1.0
+  description: |
+    Tokenized pre-IPO trading platform (take-home).
+
+    Stretch features included:
+    - GBM simulated price ticks
+    - WebSocket price streaming (`/prices` namespace, `price` event)
+    - HTTP rate limiting (429 when exceeded; configure via `THROTTLE_*`)
+    - Short selling with 50% initial margin
+    - Price-time-priority matching across users
+    - Admin halt/resume per symbol
 servers:
   - url: http://localhost:3000
 paths:
@@ -12,6 +21,8 @@ paths:
       responses:
         "200":
           description: OK
+        "429":
+          description: Rate limited
   /auth/token:
     post:
       summary: Issue JWT for a username (creates user with $100k cash if new)
@@ -30,12 +41,16 @@ paths:
           description: Token issued
         "400":
           description: Missing username
+        "429":
+          description: Rate limited
   /assets:
     get:
       summary: List simulated assets with price history
       responses:
         "200":
           description: Asset list
+        "429":
+          description: Rate limited
   /assets/{symbol}:
     get:
       summary: Asset detail + history
@@ -50,6 +65,8 @@ paths:
           description: Asset
         "404":
           description: Not found
+        "429":
+          description: Rate limited
   /calculator:
     post:
       summary: Convert USD amount to shares (no side effects)
@@ -70,9 +87,11 @@ paths:
           description: Shares quote
         "400":
           description: Bad input
+        "429":
+          description: Rate limited
   /orders:
     post:
-      summary: Place market or limit order
+      summary: Place market or limit order (supports short sells with margin)
       security:
         - bearerAuth: []
       parameters:
@@ -105,11 +124,13 @@ paths:
         "201":
           description: Order accepted
         "400":
-          description: Validation / insufficient funds
+          description: Validation / insufficient funds or margin
         "401":
           description: Unauthorized
         "503":
-          description: Circuit breaker open
+          description: Circuit breaker open or trading halted
+        "429":
+          description: Rate limited
   /orders/{id}:
     delete:
       summary: Cancel a resting order
@@ -128,9 +149,11 @@ paths:
           description: Not cancellable
         "404":
           description: Not found
+        "429":
+          description: Rate limited
   /portfolio:
     get:
-      summary: Current holdings, cost basis, P&L
+      summary: Current holdings (incl. negative short qty), cost basis, P&L, margin
       security:
         - bearerAuth: []
       responses:
@@ -138,6 +161,8 @@ paths:
           description: Portfolio
         "401":
           description: Unauthorized
+        "429":
+          description: Rate limited
   /portfolio/history:
     get:
       summary: Reconstruct portfolio at timestamp from ledger
@@ -155,9 +180,11 @@ paths:
           description: Reconstructed portfolio
         "400":
           description: Missing/invalid at
+        "429":
+          description: Rate limited
   /admin/prices/{symbol}:
     post:
-      summary: Set simulated price and match resting limits
+      summary: Set simulated mark price and match the resting book (price-time priority)
       security:
         - bearerAuth: []
       parameters:
@@ -178,12 +205,51 @@ paths:
                 ts:
                   type: string
                   format: date-time
-                fillFraction:
-                  type: number
-                  description: Portion of remaining qty to fill (partial fills)
       responses:
         "200":
           description: Updated
+        "429":
+          description: Rate limited
+  /admin/halt/{symbol}:
+    post:
+      summary: Manually halt trading for a symbol (independent of circuit breaker)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: symbol
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Halted
+        "400":
+          description: Unknown symbol
+        "401":
+          description: Unauthorized
+        "429":
+          description: Rate limited
+  /admin/resume/{symbol}:
+    post:
+      summary: Resume trading for a previously halted symbol
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: symbol
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Resumed
+        "400":
+          description: Unknown symbol
+        "401":
+          description: Unauthorized
+        "429":
+          description: Rate limited
 components:
   securitySchemes:
     bearerAuth:

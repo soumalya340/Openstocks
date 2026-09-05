@@ -11,15 +11,21 @@ import {
 import type { Db } from "../db.js";
 import { DB_CONNECTION } from "../database/database.tokens.js";
 import { AuthGuard } from "../auth/auth.guard.js";
-import { setPrice } from "../market/index.js";
+import { CurrentUser } from "../auth/current-user.decorator.js";
+import type { AuthUser } from "../auth/auth.types.js";
+import {
+  haltTrading,
+  resumeTrading,
+  setPrice,
+} from "../market/index.js";
 import { matchOpenLimits } from "./index.js";
 
-@Controller("admin/prices")
+@Controller("admin")
 @UseGuards(AuthGuard)
 export class AdminController {
   constructor(@Inject(DB_CONNECTION) private readonly db: Db) {}
 
-  @Post(":symbol")
+  @Post("prices/:symbol")
   @HttpCode(200)
   setPrice(
     @Param("symbol") symbol: string,
@@ -28,10 +34,41 @@ export class AdminController {
     try {
       const price = Number(body?.price);
       const now = body?.ts ? String(body.ts) : new Date().toISOString();
-      const fraction = body?.fillFraction === undefined ? 1 : Number(body.fillFraction);
       const asset = setPrice(this.db, String(symbol), price, now);
-      const filled = matchOpenLimits(this.db, String(symbol), price, now, fraction);
+      // Match resting book under price-time priority (fillFraction ignored).
+      const filled = matchOpenLimits(this.db, String(symbol), price, now);
       return { asset, matchedOrders: filled };
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
+  }
+
+  @Post("halt/:symbol")
+  @HttpCode(200)
+  halt(
+    @Param("symbol") symbol: string,
+    @CurrentUser() user: AuthUser,
+    @Body() body: { ts?: unknown }
+  ) {
+    try {
+      const now = body?.ts ? String(body.ts) : new Date().toISOString();
+      haltTrading(this.db, String(symbol), now, user.userId);
+      return { symbol: String(symbol), halted: true, at: now };
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
+  }
+
+  @Post("resume/:symbol")
+  @HttpCode(200)
+  resume(
+    @Param("symbol") symbol: string,
+    @Body() body: { ts?: unknown }
+  ) {
+    try {
+      const now = body?.ts ? String(body.ts) : new Date().toISOString();
+      resumeTrading(this.db, String(symbol), now);
+      return { symbol: String(symbol), halted: false, at: now };
     } catch (e) {
       throw new BadRequestException((e as Error).message);
     }

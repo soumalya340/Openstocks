@@ -6,6 +6,62 @@ const CIRCUIT_MOVE_PCT = 0.15;
 const CIRCUIT_LOOKBACK_MS = 60_000;
 const CIRCUIT_HALT_MS = 30_000;
 
+/** GBM parameters for simulated price ticks (per-tick Δt = 1). */
+export const GBM = {
+  MU: 0,
+  SIGMA: 0.02,
+  DT: 1,
+} as const;
+
+export type NormalSampler = () => number;
+
+type PriceListener = (asset: Asset) => void;
+const priceListeners = new Set<PriceListener>();
+
+/** Subscribe to price updates (used by the WebSocket gateway). */
+export function onPriceUpdate(listener: PriceListener): () => void {
+  priceListeners.add(listener);
+  return () => {
+    priceListeners.delete(listener);
+  };
+}
+
+function notifyPriceUpdate(asset: Asset): void {
+  for (const listener of priceListeners) {
+    listener(asset);
+  }
+}
+
+/** Box–Muller standard normal sample. */
+export function sampleNormal(): number {
+  let u1 = 0;
+  let u2 = 0;
+  // Avoid log(0)
+  while (u1 === 0) u1 = Math.random();
+  while (u2 === 0) u2 = Math.random();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+/**
+ * One GBM step: S' = S * exp((μ − σ²/2)Δt + σ√Δt · Z).
+ * Prices stay positive (floored at 0.01 after rounding).
+ */
+export function gbmNextPrice(
+  S: number,
+  Z: number,
+  mu: number = GBM.MU,
+  sigma: number = GBM.SIGMA,
+  dt: number = GBM.DT
+): number {
+  if (!(S > 0) || !Number.isFinite(S)) {
+    throw new Error("spot must be positive");
+  }
+  const drift = (mu - (sigma * sigma) / 2) * dt;
+  const diffusion = sigma * Math.sqrt(dt) * Z;
+  const next = S * Math.exp(drift + diffusion);
+  return Math.max(0.01, Number(next.toFixed(4)));
+}
+
 export function listAssets(db: Db): Asset[] {
   const rows = db
     .prepare(`SELECT symbol, name, price, updated_at FROM assets ORDER BY symbol`)
@@ -98,18 +154,23 @@ export function setPrice(
   });
 
   maybeTripCircuitBreaker(db, symbol, ts);
-  return getAsset(db, symbol)!;
+  const updated = getAsset(db, symbol)!;
+  notifyPriceUpdate(updated);
+  return updated;
 }
 
 /**
- * Advance simulated prices with a small random walk.
- * Exposed for demos; tests prefer setPrice for determinism.
+ * Advance simulated prices with one geometric Brownian motion step per asset.
+ * Pass `sample` to inject deterministic normals in tests.
  */
-export function tickPrices(db: Db, now: string = new Date().toISOString()): Asset[] {
+export function tickPrices(
+  db: Db,
+  now: string = new Date().toISOString(),
+  sample: NormalSampler = sampleNormal
+): Asset[] {
   const assets = listAssets(db);
   for (const a of assets) {
-    const delta = (Math.random() - 0.5) * 0.01; // ±0.5%
-    const next = Math.max(0.01, Number((a.price * (1 + delta)).toFixed(4)));
+    const next = gbmNextPrice(a.price, sample());
     setPrice(db, a.symbol, next, now);
   }
   return listAssets(db);
@@ -152,6 +213,51 @@ export function isCircuitOpen(
     return { open: true, until: row.until_ts };
   }
   return { open: false };
+}
+
+/** Manual admin halt — independent of the automatic circuit breaker. */
+export function haltTrading(
+  db: Db,
+  symbol: string,
+  nowIso: string = new Date().toISOString(),
+  haltedBy: string | null = null
+): void {
+  const asset = getAsset(db, symbol);
+  if (!asset) throw new Error(`Unknown symbol: ${symbol}`);
+  db.prepare(
+    `INSERT INTO trading_halts (symbol, halted_at, halted_by)
+     VALUES (?, ?, ?)
+     ON CONFLICT(symbol) DO UPDATE SET halted_at = excluded.halted_at, halted_by = excluded.halted_by`
+  ).run(symbol, nowIso, haltedBy);
+  appendLedger(db, {
+    type: "TRADING_HALTED",
+    symbol,
+    payload: { haltedBy },
+    ts: nowIso,
+  });
+}
+
+export function resumeTrading(
+  db: Db,
+  symbol: string,
+  nowIso: string = new Date().toISOString()
+): void {
+  const asset = getAsset(db, symbol);
+  if (!asset) throw new Error(`Unknown symbol: ${symbol}`);
+  db.prepare(`DELETE FROM trading_halts WHERE symbol = ?`).run(symbol);
+  appendLedger(db, {
+    type: "TRADING_RESUMED",
+    symbol,
+    payload: {},
+    ts: nowIso,
+  });
+}
+
+export function isTradingHalted(db: Db, symbol: string): boolean {
+  const row = db
+    .prepare(`SELECT symbol FROM trading_halts WHERE symbol = ?`)
+    .get(symbol) as { symbol: string } | undefined;
+  return Boolean(row);
 }
 
 export const CIRCUIT = {

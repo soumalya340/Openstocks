@@ -39,6 +39,8 @@ Environment variables are loaded from `.env` via `dotenv` (`src/env.ts`):
 | `PORT` | `3000` | HTTP port |
 | `DB_PATH` | `./data/openstocks.sqlite` | SQLite file (`:memory:` supported) |
 | `JWT_SECRET` | `openstocks-dev-secret` | HS256 signing key |
+| `THROTTLE_TTL_MS` | `60000` | Rate-limit window (ms) |
+| `THROTTLE_LIMIT` | `1` | Max requests per IP per window (**1 rpm**) |
 
 `.env` is gitignored; commit `.env.example` as the template. Requires Node 20+.
 
@@ -76,8 +78,11 @@ curl -s "http://localhost:3000/portfolio/history?at=2026-06-01T12:00:00.000Z" \
 - **NestJS + TypeScript** — modules/controllers/providers around Nest's DI container, running on `@nestjs/platform-express` under the hood.
 - **SQLite (`better-sqlite3`)** — Assignment prefers PostgreSQL; `psql` is unavailable here. SQLite keeps relational ledger semantics and zero-ops local runs. Schema is Postgres-portable.
 - **Append-only ledger** — `GET /portfolio/history?at=` replays ledger events; live `users`/`holdings` tables are a materialized convenience only.
-- **Matching** — Market orders fill at mid; limit orders reserve funds/shares and fill when mid crosses (partial fills supported). Full multi-user CLOB is a stretch goal.
+- **Matching** — Price-time-priority CLOB across users: better prices first, FIFO at a price, maker limit is the trade price, partial book consumption. Residual market size (empty book) still fills at the mark.
+- **Short selling** — Sells may open/increase a negative holding when free cash covers **50% initial margin** on the short notional; covers release collateral proportionally.
+- **Prices** — Simulated via geometric Brownian motion (`tickPrices`); admin `POST /admin/prices/:symbol` sets the mark and re-matches the book. Updates are pushed on the Socket.IO `/prices` namespace (`price` event).
 - **Auth** — Lightweight JWT via `POST /auth/token`, enforced with a Nest `AuthGuard`.
+- **Rate limiting** — Global `@nestjs/throttler` guard; excess requests return HTTP 429 `{ error }`.
 - **Error shape** — a global `HttpErrorFilter` normalizes every thrown exception to `{ error: string }` so the API contract stays stable regardless of Nest's default exception body shape.
 
 See `deps/Architecture.md`, `deps/Decisions.md`, and `deps/Thinking_Model.md` for deeper rationale.
@@ -96,16 +101,19 @@ Full OpenAPI document: [`openapi.yaml`](./openapi.yaml).
 | DELETE | `/orders/:id` | Bearer | Cancel resting order |
 | GET | `/portfolio` | Bearer | Holdings, cost basis, P&L |
 | GET | `/portfolio/history?at=` | Bearer | Ledger replay as-of timestamp |
-| POST | `/admin/prices/:symbol` | Bearer | Deterministic price + match helper |
+| POST | `/admin/prices/:symbol` | Bearer | Set mark + match resting book |
+| POST | `/admin/halt/:symbol` | Bearer | Manual trading halt (per symbol) |
+| POST | `/admin/resume/:symbol` | Bearer | Resume after manual halt |
 | GET | `/health` | — | Liveness |
+| WS | `/prices` | — | Socket.IO namespace; `price` events on updates |
 
 ## Known limitations
 
-- Not a production multi-tenant matching engine (no full price-time priority across users).
-- Price feed is simulated (random walk / explicit admin set), not real market data.
+- Order book UI is not implemented (stretch goal left out on purpose).
+- Price feed is simulated (GBM ticks / explicit admin set), not real market data.
+- Margin is a simple 50% initial-collateral rule — no locate, borrow fees, margin calls, or forced liquidation schedules.
 - SQLite single-writer; horizontal scale would need Postgres + a real matching service.
 - JWT secret is a demo default — rotate via `JWT_SECRET` before any shared deploy.
-- No WebSocket streaming, UI, rate limiting, short selling, or GBM (stretch goals).
 
 ## Tests
 
@@ -113,4 +121,4 @@ Full OpenAPI document: [`openapi.yaml`](./openapi.yaml).
 yarn test
 ```
 
-Coverage includes: assets/calculator side-effect freedom, market/limit place, partial fill + cancel, idempotent replay, circuit breaker rejection, auth rejection, portfolio ledger history, and concurrent order placement.
+Coverage includes: assets/calculator side-effect freedom, market/limit place, partial fill + cancel, idempotent replay, circuit breaker rejection, auth rejection, portfolio ledger history, concurrent order placement, GBM ticks, WebSocket price push, rate-limit 429, short + margin + cover, price-time-priority matching, and admin halt/resume.

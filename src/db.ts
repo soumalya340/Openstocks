@@ -83,8 +83,16 @@ function migrate(db: Db): void {
       symbol TEXT NOT NULL,
       quantity REAL NOT NULL,
       cost_basis REAL NOT NULL,
+      margin_reserved REAL NOT NULL DEFAULT 0,
       PRIMARY KEY (user_id, symbol),
       FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS trading_halts (
+      symbol TEXT PRIMARY KEY,
+      halted_at TEXT NOT NULL,
+      halted_by TEXT,
+      FOREIGN KEY (symbol) REFERENCES assets(symbol)
     );
 
     CREATE TABLE IF NOT EXISTS ledger (
@@ -115,6 +123,16 @@ function migrate(db: Db): void {
     CREATE INDEX IF NOT EXISTS idx_price_history_symbol_ts ON price_history(symbol, ts);
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
   `);
+
+  // Additive migration for DBs created before margin_reserved existed.
+  const holdingCols = db
+    .prepare(`PRAGMA table_info(holdings)`)
+    .all() as Array<{ name: string }>;
+  if (!holdingCols.some((c) => c.name === "margin_reserved")) {
+    db.exec(
+      `ALTER TABLE holdings ADD COLUMN margin_reserved REAL NOT NULL DEFAULT 0`
+    );
+  }
 }
 
 function seed(db: Db): void {

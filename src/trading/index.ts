@@ -1,8 +1,17 @@
 import { v4 as uuid } from "uuid";
 import type { Db } from "../db.js";
 import { appendLedger } from "../ledger/index.js";
-import { getAsset, isCircuitOpen } from "../market/index.js";
+import {
+  getAsset,
+  isCircuitOpen,
+  isTradingHalted,
+} from "../market/index.js";
 import type { Order, OrderType, Side } from "../types.js";
+
+/** Initial margin as a fraction of short notional reserved from free cash. */
+export const MARGIN = {
+  INITIAL_PCT: 0.5,
+} as const;
 
 function roundMoney(n: number): number {
   return Math.round(n * 100) / 100;
@@ -88,13 +97,83 @@ function getUserCash(db: Db, userId: string): number {
   return row.cash;
 }
 
-function getHoldingQty(db: Db, userId: string, symbol: string): number {
-  const row = db
-    .prepare(`SELECT quantity FROM holdings WHERE user_id = ? AND symbol = ?`)
-    .get(userId, symbol) as { quantity: number } | undefined;
-  return row?.quantity ?? 0;
+function getHoldingRow(
+  db: Db,
+  userId: string,
+  symbol: string
+): { quantity: number; cost_basis: number; margin_reserved: number } | undefined {
+  return db
+    .prepare(
+      `SELECT quantity, cost_basis, margin_reserved FROM holdings WHERE user_id = ? AND symbol = ?`
+    )
+    .get(userId, symbol) as
+    | { quantity: number; cost_basis: number; margin_reserved: number }
+    | undefined;
 }
 
+function getHoldingQty(db: Db, userId: string, symbol: string): number {
+  return getHoldingRow(db, userId, symbol)?.quantity ?? 0;
+}
+
+function sumOrderReservedCash(db: Db, userId: string): number {
+  return (
+    db
+      .prepare(
+        `SELECT COALESCE(SUM(reserved_cash), 0) AS s FROM orders
+         WHERE user_id = ? AND status IN ('open', 'partially_filled')`
+      )
+      .get(userId) as { s: number }
+  ).s;
+}
+
+function sumHoldingsMargin(db: Db, userId: string): number {
+  return (
+    db
+      .prepare(
+        `SELECT COALESCE(SUM(margin_reserved), 0) AS s FROM holdings WHERE user_id = ?`
+      )
+      .get(userId) as { s: number }
+  ).s;
+}
+
+/** Cash available after limit-buy reservations and posted short margin. */
+export function getFreeCash(db: Db, userId: string): number {
+  return roundMoney(
+    getUserCash(db, userId) - sumOrderReservedCash(db, userId) - sumHoldingsMargin(db, userId)
+  );
+}
+
+export function requiredMargin(shortQty: number, price: number): number {
+  if (shortQty <= 0) return 0;
+  return roundMoney(shortQty * price * MARGIN.INITIAL_PCT);
+}
+
+function upsertHolding(
+  db: Db,
+  userId: string,
+  symbol: string,
+  quantity: number,
+  costBasis: number,
+  marginReserved: number
+): void {
+  const existing = getHoldingRow(db, userId, symbol);
+  if (existing) {
+    db.prepare(
+      `UPDATE holdings SET quantity = ?, cost_basis = ?, margin_reserved = ?
+       WHERE user_id = ? AND symbol = ?`
+    ).run(quantity, costBasis, marginReserved, userId, symbol);
+  } else {
+    db.prepare(
+      `INSERT INTO holdings (user_id, symbol, quantity, cost_basis, margin_reserved)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(userId, symbol, quantity, costBasis, marginReserved);
+  }
+}
+
+/**
+ * Apply a fill to holdings/cash. Supports long, short, and cover paths.
+ * Returns the change in posted short margin (positive = more collateral reserved).
+ */
 function applyFillToHolding(
   db: Db,
   userId: string,
@@ -102,41 +181,87 @@ function applyFillToHolding(
   side: Side,
   qty: number,
   price: number
-): void {
-  const existing = db
-    .prepare(`SELECT quantity, cost_basis FROM holdings WHERE user_id = ? AND symbol = ?`)
-    .get(userId, symbol) as { quantity: number; cost_basis: number } | undefined;
+): { marginDelta: number } {
+  const existing = getHoldingRow(db, userId, symbol);
+  const have = existing?.quantity ?? 0;
+  const cost = existing?.cost_basis ?? 0;
+  const margin = existing?.margin_reserved ?? 0;
+  let marginDelta = 0;
 
   if (side === "buy") {
-    const newQty = roundShares((existing?.quantity ?? 0) + qty);
-    const newCost = roundMoney((existing?.cost_basis ?? 0) + qty * price);
-    if (existing) {
-      db.prepare(
-        `UPDATE holdings SET quantity = ?, cost_basis = ? WHERE user_id = ? AND symbol = ?`
-      ).run(newQty, newCost, userId, symbol);
+    if (have >= 0) {
+      const newQty = roundShares(have + qty);
+      const newCost = roundMoney(cost + qty * price);
+      upsertHolding(db, userId, symbol, newQty, newCost, margin);
     } else {
-      db.prepare(
-        `INSERT INTO holdings (user_id, symbol, quantity, cost_basis) VALUES (?, ?, ?, ?)`
-      ).run(userId, symbol, newQty, newCost);
+      const shortQty = -have;
+      if (qty + 1e-12 < shortQty) {
+        const avg = cost / have;
+        const newQty = roundShares(have + qty);
+        const newCost = roundMoney(avg * newQty);
+        const release = roundMoney(margin * (qty / shortQty));
+        marginDelta = -release;
+        upsertHolding(
+          db,
+          userId,
+          symbol,
+          newQty,
+          newCost,
+          roundMoney(Math.max(0, margin - release))
+        );
+      } else if (Math.abs(qty - shortQty) <= 1e-12) {
+        marginDelta = -margin;
+        upsertHolding(db, userId, symbol, 0, 0, 0);
+      } else {
+        const longQty = roundShares(qty - shortQty);
+        marginDelta = -margin;
+        upsertHolding(db, userId, symbol, longQty, roundMoney(longQty * price), 0);
+      }
     }
     db.prepare(`UPDATE users SET cash = cash - ? WHERE id = ?`).run(
       roundMoney(qty * price),
       userId
     );
   } else {
-    const have = existing?.quantity ?? 0;
-    if (have + 1e-12 < qty) throw new Error("Insufficient shares for fill");
-    const avg = have > 0 ? (existing!.cost_basis / have) : price;
-    const newQty = roundShares(have - qty);
-    const newCost = roundMoney(avg * newQty);
-    db.prepare(
-      `UPDATE holdings SET quantity = ?, cost_basis = ? WHERE user_id = ? AND symbol = ?`
-    ).run(newQty, newCost, userId, symbol);
+    if (have + 1e-12 >= qty) {
+      const avg = have > 0 ? cost / have : price;
+      const newQty = roundShares(have - qty);
+      const newCost = roundMoney(avg * newQty);
+      upsertHolding(db, userId, symbol, newQty, newCost, margin);
+    } else if (have > 0) {
+      const shortOpened = roundShares(qty - have);
+      const addMargin = requiredMargin(shortOpened, price);
+      marginDelta = addMargin;
+      upsertHolding(
+        db,
+        userId,
+        symbol,
+        roundShares(-shortOpened),
+        roundMoney(-shortOpened * price),
+        roundMoney(margin + addMargin)
+      );
+    } else {
+      const shortOpened = qty;
+      const addMargin = requiredMargin(shortOpened, price);
+      marginDelta = addMargin;
+      const newQty = roundShares(have - qty);
+      const newCost = roundMoney(cost - qty * price);
+      upsertHolding(
+        db,
+        userId,
+        symbol,
+        newQty,
+        newCost,
+        roundMoney(margin + addMargin)
+      );
+    }
     db.prepare(`UPDATE users SET cash = cash + ? WHERE id = ?`).run(
       roundMoney(qty * price),
       userId
     );
   }
+
+  return { marginDelta };
 }
 
 function recordFill(
@@ -152,7 +277,14 @@ function recordFill(
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(fillId, order.id, order.userId, order.symbol, order.side, qty, price, ts);
 
-  applyFillToHolding(db, order.userId, order.symbol, order.side, qty, price);
+  const { marginDelta } = applyFillToHolding(
+    db,
+    order.userId,
+    order.symbol,
+    order.side,
+    qty,
+    price
+  );
 
   const filledQuantity = roundShares(order.filledQuantity + qty);
   let reservedCash = order.reservedCash;
@@ -163,7 +295,22 @@ function recordFill(
     );
   }
   if (order.side === "sell" && order.type === "limit") {
-    reservedShares = roundShares(Math.max(0, reservedShares - qty));
+    // Release share reservation for the long portion that filled.
+    const releaseShares = Math.min(reservedShares, qty);
+    reservedShares = roundShares(Math.max(0, reservedShares - releaseShares));
+    // Margin reserved on the order for the short portion transfers to holdings on fill
+    // (applyFillToHolding already posted holdings margin); drop proportional order reserve.
+    if (order.reservedCash > 0 && qty > releaseShares) {
+      const shortFilled = roundShares(qty - releaseShares);
+      const shortPlanned = roundShares(
+        order.quantity - order.reservedShares - order.filledQuantity > 0
+          ? Math.max(0, order.quantity - (order.reservedShares + order.filledQuantity))
+          : shortFilled
+      );
+      // Simpler: reduce order reservedCash by margin on the short-filled slice at limit.
+      const marginSlice = requiredMargin(shortFilled, order.limitPrice ?? price);
+      reservedCash = roundMoney(Math.max(0, reservedCash - marginSlice));
+    }
   }
 
   const status =
@@ -183,7 +330,9 @@ function recordFill(
       ? roundMoney(qty * (order.limitPrice ?? price))
       : 0;
   const releasedShares =
-    order.side === "sell" && order.type === "limit" ? qty : 0;
+    order.side === "sell" && order.type === "limit"
+      ? Math.min(order.reservedShares, qty)
+      : 0;
 
   appendLedger(db, {
     type: "ORDER_FILL",
@@ -200,6 +349,7 @@ function recordFill(
       status,
       releasedCash,
       releasedShares,
+      marginDelta,
     },
     ts,
   });
@@ -209,6 +359,140 @@ function recordFill(
   order.reservedCash = reservedCash;
   order.reservedShares = reservedShares;
   order.updatedAt = ts;
+}
+
+/** Resting opposite-side limits sorted by price-time priority. */
+function loadRestingBook(
+  db: Db,
+  symbol: string,
+  side: Side
+): Order[] {
+  const orderBy =
+    side === "buy"
+      ? `limit_price DESC, created_at ASC, id ASC`
+      : `limit_price ASC, created_at ASC, id ASC`;
+  const rows = db
+    .prepare(
+      `SELECT * FROM orders
+       WHERE symbol = ? AND side = ? AND type = 'limit'
+         AND status IN ('open', 'partially_filled')
+       ORDER BY ${orderBy}`
+    )
+    .all(symbol, side) as Array<Parameters<typeof rowToOrder>[0]>;
+  return rows.map(rowToOrder);
+}
+
+function pricesCross(
+  takerSide: Side,
+  takerType: OrderType,
+  takerLimit: number | null,
+  makerLimit: number
+): boolean {
+  if (takerType === "market") return true;
+  if (takerSide === "buy") return (takerLimit ?? 0) + 1e-12 >= makerLimit;
+  return (takerLimit ?? Infinity) - 1e-12 <= makerLimit;
+}
+
+/**
+ * Match a taker against the resting opposite book under price-time priority.
+ * Fill price is always the resting (maker) limit. Returns total qty filled on book.
+ */
+function matchAgainstBook(db: Db, taker: Order, now: string): number {
+  const opposite: Side = taker.side === "buy" ? "sell" : "buy";
+  let filledOnBook = 0;
+
+  // Re-load book each pass so partial maker updates are visible; break when no cross.
+  while (true) {
+    const takerFresh = getOrder(db, taker.id);
+    if (!takerFresh) break;
+    Object.assign(taker, takerFresh);
+    const remaining = roundShares(taker.quantity - taker.filledQuantity);
+    if (remaining <= 0) break;
+
+    const book = loadRestingBook(db, taker.symbol, opposite);
+    let matched = false;
+    for (const maker of book) {
+      if (maker.userId === taker.userId) continue; // no self-trade
+      if (maker.id === taker.id) continue;
+      const makerRem = roundShares(maker.quantity - maker.filledQuantity);
+      if (makerRem <= 0) continue;
+      if (!pricesCross(taker.side, taker.type, taker.limitPrice, maker.limitPrice!)) {
+        // Book is sorted by price priority — later makers cannot be better.
+        break;
+      }
+      const fillQty = roundShares(Math.min(remaining, makerRem));
+      if (fillQty <= 0) continue;
+      const tradePrice = maker.limitPrice!;
+      recordFill(db, maker, fillQty, tradePrice, now);
+      recordFill(db, taker, fillQty, tradePrice, now);
+      filledOnBook = roundShares(filledOnBook + fillQty);
+      matched = true;
+      break; // restart with refreshed book/taker
+    }
+    if (!matched) break;
+  }
+
+  return filledOnBook;
+}
+
+/**
+ * Match resting bids against resting asks while best bid >= best ask.
+ * Used after mark-price updates; does not fill at mid without a counterparty.
+ */
+export function matchBook(db: Db, symbol: string, now: string = new Date().toISOString()): Order[] {
+  const touched = new Set<string>();
+  const tx = db.transaction(() => {
+    while (true) {
+      const bids = loadRestingBook(db, symbol, "buy");
+      const asks = loadRestingBook(db, symbol, "sell");
+      if (bids.length === 0 || asks.length === 0) break;
+
+      let pair: { bid: Order; ask: Order } | null = null;
+      for (const bid of bids) {
+        for (const ask of asks) {
+          if (bid.userId === ask.userId) continue;
+          if (bid.limitPrice! + 1e-12 < ask.limitPrice!) continue;
+          pair = { bid, ask };
+          break;
+        }
+        if (pair) break;
+      }
+      if (!pair) break;
+
+      const bidRem = roundShares(pair.bid.quantity - pair.bid.filledQuantity);
+      const askRem = roundShares(pair.ask.quantity - pair.ask.filledQuantity);
+      const fillQty = roundShares(Math.min(bidRem, askRem));
+      if (fillQty <= 0) break;
+
+      // Maker is the earlier resting order; trade at maker's price.
+      const bidFirst =
+        pair.bid.createdAt < pair.ask.createdAt ||
+        (pair.bid.createdAt === pair.ask.createdAt && pair.bid.id < pair.ask.id);
+      const tradePrice = bidFirst ? pair.bid.limitPrice! : pair.ask.limitPrice!;
+
+      recordFill(db, pair.bid, fillQty, tradePrice, now);
+      recordFill(db, pair.ask, fillQty, tradePrice, now);
+      touched.add(pair.bid.id);
+      touched.add(pair.ask.id);
+    }
+  });
+  tx();
+  return [...touched].map((id) => getOrder(db, id)!).filter(Boolean);
+}
+
+/**
+ * After a price update, match the resting book (price-time priority).
+ * `mid` / `maxFillFraction` are retained for call-site compatibility but do not
+ * force mid-print fills — quantity is consumed across opposing resting orders.
+ */
+export function matchOpenLimits(
+  db: Db,
+  symbol: string,
+  _mid?: number,
+  now: string = new Date().toISOString(),
+  _maxFillFraction: number = 1
+): Order[] {
+  return matchBook(db, symbol, now);
 }
 
 export interface PlaceOrderInput {
@@ -262,6 +546,14 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     return { ok: false, error: `Unknown symbol: ${symbol}`, statusCode: 404 };
   }
 
+  if (isTradingHalted(db, symbol)) {
+    return {
+      ok: false,
+      error: `Trading halted for ${symbol}`,
+      statusCode: 503,
+    };
+  }
+
   const circuit = isCircuitOpen(db, symbol, now);
   if (circuit.open) {
     return {
@@ -272,7 +564,6 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
   }
 
   const placeTx = db.transaction((): PlaceOrderResult => {
-    // Re-check idempotency inside the transaction for concurrent callers.
     const again = getIdempotentResponse(db, userId, idempotencyKey);
     if (again) {
       return {
@@ -285,71 +576,58 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     let reservedCash = 0;
     let reservedShares = 0;
 
+    const otherReservedShares = (
+      db
+        .prepare(
+          `SELECT COALESCE(SUM(reserved_shares), 0) AS s FROM orders
+           WHERE user_id = ? AND symbol = ? AND status IN ('open', 'partially_filled')`
+        )
+        .get(userId, symbol) as { s: number }
+    ).s;
+    const held = getHoldingQty(db, userId, symbol);
+    const availableLong = Math.max(0, held - otherReservedShares);
+
     if (type === "limit" && side === "buy") {
       reservedCash = roundMoney(quantity * (limitPrice as number));
-      const cash = getUserCash(db, userId);
-      // Available cash excludes other reservations
-      const otherReserved = (
-        db
-          .prepare(
-            `SELECT COALESCE(SUM(reserved_cash), 0) AS s FROM orders
-             WHERE user_id = ? AND status IN ('open', 'partially_filled')`
-          )
-          .get(userId) as { s: number }
-      ).s;
-      if (cash - otherReserved + 1e-9 < reservedCash) {
+      if (getFreeCash(db, userId) + 1e-9 < reservedCash) {
         return { ok: false, error: "Insufficient cash to reserve for limit buy", statusCode: 400 };
       }
     }
 
     if (type === "limit" && side === "sell") {
-      reservedShares = quantity;
-      const held = getHoldingQty(db, userId, symbol);
-      const otherReserved = (
-        db
-          .prepare(
-            `SELECT COALESCE(SUM(reserved_shares), 0) AS s FROM orders
-             WHERE user_id = ? AND symbol = ? AND status IN ('open', 'partially_filled')`
-          )
-          .get(userId, symbol) as { s: number }
-      ).s;
-      if (held - otherReserved + 1e-12 < reservedShares) {
-        return {
-          ok: false,
-          error: "Insufficient shares to reserve for limit sell",
-          statusCode: 400,
-        };
+      const longPortion = Math.min(quantity, availableLong);
+      const shortPortion = roundShares(quantity - longPortion);
+      reservedShares = longPortion;
+      if (shortPortion > 0) {
+        reservedCash = requiredMargin(shortPortion, limitPrice as number);
+        if (getFreeCash(db, userId) + 1e-9 < reservedCash) {
+          return {
+            ok: false,
+            error: "Insufficient margin for short limit sell",
+            statusCode: 400,
+          };
+        }
       }
     }
 
     if (type === "market" && side === "buy") {
       const cost = roundMoney(quantity * asset.price);
-      const cash = getUserCash(db, userId);
-      const otherReserved = (
-        db
-          .prepare(
-            `SELECT COALESCE(SUM(reserved_cash), 0) AS s FROM orders
-             WHERE user_id = ? AND status IN ('open', 'partially_filled')`
-          )
-          .get(userId) as { s: number }
-      ).s;
-      if (cash - otherReserved + 1e-9 < cost) {
+      if (getFreeCash(db, userId) + 1e-9 < cost) {
         return { ok: false, error: "Insufficient cash for market buy", statusCode: 400 };
       }
     }
 
     if (type === "market" && side === "sell") {
-      const held = getHoldingQty(db, userId, symbol);
-      const otherReserved = (
-        db
-          .prepare(
-            `SELECT COALESCE(SUM(reserved_shares), 0) AS s FROM orders
-             WHERE user_id = ? AND symbol = ? AND status IN ('open', 'partially_filled')`
-          )
-          .get(userId, symbol) as { s: number }
-      ).s;
-      if (held - otherReserved + 1e-12 < quantity) {
-        return { ok: false, error: "Insufficient shares for market sell", statusCode: 400 };
+      const shortPortion = roundShares(Math.max(0, quantity - availableLong));
+      if (shortPortion > 0) {
+        const margin = requiredMargin(shortPortion, asset.price);
+        if (getFreeCash(db, userId) + 1e-9 < margin) {
+          return {
+            ok: false,
+            error: "Insufficient margin for short sell",
+            statusCode: 400,
+          };
+        }
       }
     }
 
@@ -419,11 +697,15 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
       ts: now,
     });
 
-    if (type === "market") {
-      recordFill(db, order, quantity, asset.price, now);
-    } else {
-      // Attempt immediate cross against current mid
-      tryMatchLimit(db, order, asset.price, now);
+    // Price-time match against resting opposite book first.
+    matchAgainstBook(db, order, now);
+    const afterBook = getOrder(db, order.id)!;
+    Object.assign(order, afterBook);
+
+    const remaining = roundShares(order.quantity - order.filledQuantity);
+    if (remaining > 0 && type === "market") {
+      // Residual market quantity lifts/hits synthetic mid liquidity (single-asset mark).
+      recordFill(db, order, remaining, asset.price, now);
     }
 
     const fresh = getOrder(db, order.id)!;
@@ -437,59 +719,6 @@ export function placeOrder(db: Db, input: PlaceOrderInput): PlaceOrderResult {
     });
   }
   return result;
-}
-
-function tryMatchLimit(db: Db, order: Order, mid: number, now: string): void {
-  const remaining = roundShares(order.quantity - order.filledQuantity);
-  if (remaining <= 0) return;
-  const lp = order.limitPrice!;
-  const crosses =
-    (order.side === "buy" && mid <= lp) || (order.side === "sell" && mid >= lp);
-  if (!crosses) return;
-
-  // Partial fill support: fill half remaining when mid exactly equals limit in tests,
-  // otherwise fill all remaining. Caller can invoke matchOpenLimits multiple times.
-  const fillQty = remaining;
-  recordFill(db, order, fillQty, mid, now);
-}
-
-/**
- * After a price update, attempt to fill resting limit orders that now cross.
- * Supports partial fills via `maxFillFraction` (default 1 = full remaining).
- */
-export function matchOpenLimits(
-  db: Db,
-  symbol: string,
-  mid: number,
-  now: string = new Date().toISOString(),
-  maxFillFraction: number = 1
-): Order[] {
-  const rows = db
-    .prepare(
-      `SELECT * FROM orders
-       WHERE symbol = ? AND type = 'limit' AND status IN ('open', 'partially_filled')
-       ORDER BY created_at ASC`
-    )
-    .all(symbol) as Array<Parameters<typeof rowToOrder>[0]>;
-
-  const updated: Order[] = [];
-  const tx = db.transaction(() => {
-    for (const row of rows) {
-      const order = rowToOrder(row);
-      const remaining = roundShares(order.quantity - order.filledQuantity);
-      if (remaining <= 0) continue;
-      const lp = order.limitPrice!;
-      const crosses =
-        (order.side === "buy" && mid <= lp) || (order.side === "sell" && mid >= lp);
-      if (!crosses) continue;
-      const fillQty = roundShares(remaining * Math.min(1, Math.max(0, maxFillFraction)));
-      if (fillQty <= 0) continue;
-      recordFill(db, order, fillQty, mid, now);
-      updated.push(getOrder(db, order.id)!);
-    }
-  });
-  tx();
-  return updated;
 }
 
 export type CancelResult =
@@ -521,8 +750,6 @@ export function cancelOrder(
        WHERE id = ?`
     ).run(now, orderId);
 
-    // Single release path: ORDER_CANCELLED carries releasedCash/Shares.
-    // Do not also emit RESERVATION_RELEASE — portfolio replay would double-decrement.
     appendLedger(db, {
       type: "ORDER_CANCELLED",
       userId,
