@@ -35,7 +35,9 @@ _Deliverables_
 • Tests: happy path + rejections, partial fill + cancellation, and a concurrency test
 
 _Stretch goals _
-WebSocket price streaming, order book UI, rate limiting, GBM price process, short selling w/ margin, full price-time-priority matching across users, admin halt/resume endpoint.
+WebSocket price streaming, rate limiting, GBM price process, short selling w/ margin, full price-time-priority matching across users, admin halt/resume endpoint.
+
+order book UI,
 
 _Submission_
 Send back the repo link/zip + README + any trade-offs you want to flag. If anything's ambiguous, state your assumption and move on — we care more about how you handle ambiguity than guessing our exact intent.
